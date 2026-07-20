@@ -1,0 +1,20 @@
+{
+  "action": "created",
+  "comment": {
+    "id": 314159,
+    "body": "/review",
+    "user": { "login": "octocat" }
+  },
+  "issue": {
+    "number": 42,
+    "pull_request": { "url": "https://api.github.com/repos/acme/payments-api/pulls/42" }
+  },
+  "repository": {
+    "id": 123456789,
+    "name": "payments-api",
+    "full_name": "acme/payments-api",
+    "default_branch": "main",
+    "owner": { "id": 9876543, "login": "acme" }
+  },
+  "installation": { "id": 55511 }
+}

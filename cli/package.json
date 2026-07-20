@@ -1,0 +1,29 @@
+{
+  "name": "@codeferret/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local + CI code review using the same multi-pass + verification engine as the CodeFerret PR bot. NOT published to npm — built and tested locally only; see README.md.",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "codeferret": "./bin/codeferret.mjs"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "commander": "^12.1.0",
+    "openai": "^4.77.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

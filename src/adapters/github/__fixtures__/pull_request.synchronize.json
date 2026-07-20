@@ -1,0 +1,19 @@
+{
+  "action": "synchronize",
+  "number": 42,
+  "pull_request": {
+    "number": 42,
+    "title": "Add rate limiting to auth endpoints",
+    "draft": false,
+    "head": { "sha": "aa11bb22cc33dd44ee55ff667788990011223344" },
+    "user": { "login": "octocat" }
+  },
+  "repository": {
+    "id": 123456789,
+    "name": "payments-api",
+    "full_name": "acme/payments-api",
+    "default_branch": "main",
+    "owner": { "id": 9876543, "login": "acme" }
+  },
+  "installation": { "id": 55511 }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "codeferret-dev",
+  "url": "https://authoritative-unmonetary-maisha.ngrok-free.dev",
+  "hook_attributes": {
+    "url": "https://authoritative-unmonetary-maisha.ngrok-free.dev/webhooks/github",
+    "active": true
+  },
+  "redirect_url": "https://authoritative-unmonetary-maisha.ngrok-free.dev/setup/github/callback",
+  "public": false,
+  "default_permissions": {
+    "contents": "read",
+    "pull_requests": "write",
+    "checks": "write",
+    "metadata": "read"
+  },
+  "default_events": [
+    "pull_request",
+    "pull_request_review_comment",
+    "issue_comment",
+    "push"
+  ]
+}
