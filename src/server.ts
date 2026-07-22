@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyError } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { env } from "./config.js";
@@ -9,6 +9,9 @@ import { apiRoutes } from "./routes/api.js";
 import { adminRoutes } from "./routes/admin.js";
 import { bitbucketConnectRoutes } from "./routes/bitbucketConnect.js";
 import { stopBoss } from "./queue/index.js";
+import { captureError, initSentry } from "./observability/sentry.js";
+
+initSentry();
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -46,6 +49,17 @@ export function buildServer() {
     }
   });
 
+  // Fastify already logs every error via its own logger; this just also forwards
+  // 5xx-level failures to Sentry (a no-op when SENTRY_DSN is unset) before falling
+  // through to Fastify's normal error response.
+  app.setErrorHandler((error: FastifyError, request, reply) => {
+    const statusCode = error.statusCode ?? 500;
+    if (statusCode >= 500) captureError(error, { url: request.url, method: request.method });
+    // Delegate to Fastify's own default serialization ({statusCode, error, message}) —
+    // this handler only adds the Sentry side effect, it doesn't change the response shape.
+    reply.status(statusCode).send(error);
+  });
+
   app.get("/healthz", async () => ({ ok: true }));
 
   app.register(webhookRoutes);
@@ -66,8 +80,18 @@ if (!license.valid) {
 }
 
 app.listen({ port: env().PORT, host: "0.0.0.0" }).catch((err) => {
+  captureError(err);
   app.log.error(err);
   process.exit(1);
+});
+
+process.on("uncaughtException", (err) => {
+  captureError(err);
+  app.log.fatal(err, "uncaughtException");
+});
+process.on("unhandledRejection", (err) => {
+  captureError(err);
+  app.log.error(err, "unhandledRejection");
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

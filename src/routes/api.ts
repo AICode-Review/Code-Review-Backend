@@ -28,6 +28,7 @@ import {
   getRunOrgId,
   recordAudit,
   upsertPrChain,
+  type OrgPlan,
 } from "../db/repositories.js";
 import { encryptionConfigured } from "../security/tokenCrypto.js";
 import { buildPrDiff } from "../engine/diff.js";
@@ -106,6 +107,32 @@ async function requireRole(
   if (!(await ensureOrgAccess(db, user, orgId))) return { ok: false, status: 403, error: "not a member of this org" };
   const role = await getOrgRole(db, user.id, orgId);
   if (!roleAtLeast(role, minimum)) return { ok: false, status: 403, error: `requires ${minimum} role or higher` };
+  return { ok: true };
+}
+
+const PLAN_RANK: Record<OrgPlan, number> = { free: 0, pro: 1, team: 2 };
+
+/**
+ * Plan-tier gate matching the Pricing page's claims (frontend/src/pages/public/Pricing.tsx) —
+ * mirrors the existing team_plan_required pattern already used for analytics/health/audit log.
+ * Caller is responsible for membership checks (ensureOrgAccess/requireRole) separately.
+ */
+async function requirePlan(
+  db: SupabaseClient,
+  orgId: string,
+  minimum: Exclude<OrgPlan, "free">,
+  featureLabel: string,
+): Promise<{ ok: true } | { ok: false; status: number; error: string; message: string }> {
+  const plan = await getOrgPlan(db, orgId);
+  if (PLAN_RANK[plan] < PLAN_RANK[minimum]) {
+    const tierName = minimum === "team" ? "Team" : "Pro";
+    return {
+      ok: false,
+      status: 402,
+      error: `${minimum}_plan_required`,
+      message: `${featureLabel} is a ${tierName}-plan feature. Upgrade to unlock it.`,
+    };
+  }
   return { ok: true };
 }
 
@@ -279,6 +306,9 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     if (!ctx) return reply.code(404).send({ error: "run not found" });
     if (!(await ensureOrgAccess(db, req.authedUser!, ctx.orgId))) return reply.code(403).send({ error: "not a member of this org" });
 
+    const rerunPlan = await requirePlan(db, ctx.orgId, "pro", "Manual review triggers & reruns");
+    if (!rerunPlan.ok) return reply.code(rerunPlan.status).send({ error: rerunPlan.error, message: rerunPlan.message });
+
     const usage = await getOrgUsage(db, ctx.orgId);
     if (usage.blocked) {
       return reply.code(402).send({ error: "usage_limit_exceeded", message: formatUsageLimitMessage(usage) });
@@ -320,6 +350,9 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     const orgId = parsed.data.orgId ?? (await getPrimaryOrgId(db, req.authedUser!));
     if (!orgId) return reply.code(404).send({ error: "no organization found for this account yet — install the app first" });
     if (!(await ensureOrgAccess(db, req.authedUser!, orgId))) return reply.code(403).send({ error: "not a member of this org" });
+
+    const triggerPlan = await requirePlan(db, orgId, "pro", "Manual review triggers & reruns");
+    if (!triggerPlan.ok) return reply.code(triggerPlan.status).send({ error: triggerPlan.error, message: triggerPlan.message });
 
     const usage = await getOrgUsage(db, orgId);
     if (usage.blocked) {
@@ -370,6 +403,9 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     if (!orgId) return reply.code(404).send({ error: "repo not found" });
     if (!(await ensureOrgAccess(db, req.authedUser!, orgId))) return reply.code(403).send({ error: "not a member of this org" });
 
+    const configPlan = await requirePlan(db, orgId, "pro", "Comment budget controls");
+    if (!configPlan.ok) return reply.code(configPlan.status).send({ error: configPlan.error, message: configPlan.message });
+
     const existing = await getRepoConfig(db, repoId);
     const { error } = await db.from("repos").update({ config: { ...existing, ...parsed.data } }).eq("id", repoId);
     if (error) return reply.code(500).send({ error: error.message });
@@ -398,6 +434,9 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     const { id: orgId } = req.params;
     if (!(await ensureOrgAccess(db, req.authedUser!, orgId))) return reply.code(403).send({ error: "not a member of this org" });
+
+    const createPlan = await requirePlan(db, orgId, "pro", "Rulebook");
+    if (!createPlan.ok) return reply.code(createPlan.status).send({ error: createPlan.error, message: createPlan.message });
 
     let repoId: string | null = null;
     if (parsed.data.repoName) {
@@ -429,6 +468,9 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     const { id: orgId, ruleId } = req.params;
     if (!(await ensureOrgAccess(db, req.authedUser!, orgId))) return reply.code(403).send({ error: "not a member of this org" });
 
+    const togglePlan = await requirePlan(db, orgId, "pro", "Rulebook");
+    if (!togglePlan.ok) return reply.code(togglePlan.status).send({ error: togglePlan.error, message: togglePlan.message });
+
     const { error } = await db.from("rulebook_rules").update({ active: parsed.data.active }).eq("id", ruleId).eq("org_id", orgId);
     if (error) return reply.code(500).send({ error: error.message });
     await recordAudit(db, orgId, actorLabel(req.authedUser!), parsed.data.active ? "rule.activated" : "rule.deactivated", ruleId);
@@ -439,6 +481,9 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     const db = getDb();
     const { id: orgId, ruleId } = req.params;
     if (!(await ensureOrgAccess(db, req.authedUser!, orgId))) return reply.code(403).send({ error: "not a member of this org" });
+
+    const deletePlan = await requirePlan(db, orgId, "pro", "Rulebook");
+    if (!deletePlan.ok) return reply.code(deletePlan.status).send({ error: deletePlan.error, message: deletePlan.message });
 
     const { error } = await db.from("rulebook_rules").delete().eq("id", ruleId).eq("org_id", orgId);
     if (error) return reply.code(500).send({ error: error.message });

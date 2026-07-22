@@ -14,6 +14,18 @@ import { handleHealthSnapshot, handleHealthSnapshotFanout } from "./jobs/healthS
 import { handleChatReply } from "./jobs/chatReply.js";
 import { handleIndexRepo } from "./jobs/indexRepo.js";
 import { verifyLicense } from "./license.js";
+import { captureError, initSentry } from "./observability/sentry.js";
+
+initSentry();
+
+process.on("uncaughtException", (err) => {
+  captureError(err);
+  console.error("[worker] uncaughtException:", err);
+});
+process.on("unhandledRejection", (err) => {
+  captureError(err);
+  console.error("[worker] unhandledRejection:", err);
+});
 
 async function main() {
   const license = verifyLicense();
@@ -119,6 +131,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 
 main().catch((err) => {
+  captureError(err);
   console.error("[worker] fatal:", err);
   process.exit(1);
 });

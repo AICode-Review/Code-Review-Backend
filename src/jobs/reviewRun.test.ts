@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { PlatformAdapter } from "../adapters/types.js";
 import { createFakeRouter } from "../llm/fakeRouter.js";
 import { createFakeSupabase } from "../testUtils/fakeSupabase.js";
+import { upsertPrChain } from "../db/repositories.js";
+import * as verifyIndex from "../verify/index.js";
 import type { ReviewRunJob } from "../queue/index.js";
 import { handleReviewRun } from "./reviewRun.js";
 
@@ -11,6 +13,7 @@ import { handleReviewRun } from "./reviewRun.js";
 vi.mock("../indexer/embeddings.js", () => ({
   embedTexts: vi.fn(async () => ({ vectors: [], costUsd: 0 })),
 }));
+
 
 const sendMailMock = vi.fn();
 const createTransportMock = vi.fn((_options: unknown) => ({ sendMail: sendMailMock }));
@@ -296,5 +299,48 @@ describe("handleReviewRun (orchestrator)", () => {
 
     expect(createTransportMock).not.toHaveBeenCalled();
     expect(sendMailMock).not.toHaveBeenCalled();
+  });
+
+  it("disables sandbox execution verification for a free-plan org — degrades exactly like Docker being unavailable", async () => {
+    // spyOn (no mockImplementation) calls through to the real verifyFinding — preserves its
+    // actual static-check/cross-exam behavior for every other test, while letting this one
+    // inspect the runSandbox argument reviewRun.ts decided to pass.
+    const spy = vi.spyOn(verifyIndex, "verifyFinding");
+    const { client: db } = createFakeSupabase();
+    const router = createFakeRouter({
+      "pass.security": { candidates: [SECURITY_CANDIDATE] },
+      "verify.cross_exam": { verdict: "upheld", reasoning: "x" },
+    });
+    const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
+    const adapter = fakeAdapter(calls);
+
+    await handleReviewRun(job(), { db, adapter, router });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const sandboxOverride = spy.mock.calls[0]?.[3] as (() => Promise<{ available: boolean; reproduced: boolean; output: string }>) | undefined;
+    expect(sandboxOverride).toBeTypeOf("function");
+    await expect(sandboxOverride!()).resolves.toEqual({ available: false, reproduced: false, output: "" });
+    spy.mockRestore();
+  });
+
+  it("leaves sandbox execution verification enabled for a pro-plan org", async () => {
+    const spy = vi.spyOn(verifyIndex, "verifyFinding");
+    const { client: db, tables } = createFakeSupabase();
+    const testJob = job();
+    const { orgId } = await upsertPrChain(db, testJob.pr, testJob.headSha);
+    tables["subscriptions"] = [{ org_id: orgId, tier: "pro", status: "active", seats: 1 }];
+
+    const router = createFakeRouter({
+      "pass.security": { candidates: [SECURITY_CANDIDATE] },
+      "verify.cross_exam": { verdict: "upheld", reasoning: "x" },
+    });
+    const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
+    const adapter = fakeAdapter(calls);
+
+    await handleReviewRun(testJob, { db, adapter, router });
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[3]).toBeUndefined(); // undefined = verifyFinding's own real default (runInSandbox)
+    spy.mockRestore();
   });
 });

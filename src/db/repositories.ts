@@ -651,14 +651,22 @@ async function countMonthlyReviews(db: SupabaseClient, orgId: string, periodStar
   const prIds = (prRows ?? []).map((p) => p.id as string);
   if (prIds.length === 0) return 0;
 
-  const { count } = await db
+  const { data: runRows } = await db
     .from("review_runs")
-    .select("id", { count: "exact", head: true })
+    .select("status, llm_cost_usd")
     .in("pr_id", prIds)
     .is("blocked_reason", null)
     .gte("started_at", periodStart.toISOString())
     .lt("started_at", periodEnd.toISOString());
-  return count ?? 0;
+
+  // A run that failed with zero LLM spend (crashed before/without ever making a model
+  // call — misconfiguration, a bug, a transient provider outage before the first request)
+  // never actually cost anything and shouldn't consume the org's quota either — same
+  // fairness principle as the blocked_reason exclusion above, just for failures that
+  // happen after the gate instead of before it.
+  return ((runRows ?? []) as { status: string; llm_cost_usd: number | null }[]).filter(
+    (r) => r.status !== "failed" || Number(r.llm_cost_usd ?? 0) > 0,
+  ).length;
 }
 
 /** Shared wording so the synchronous API 402 and the async job-level block never drift apart. */

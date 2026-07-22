@@ -1,6 +1,14 @@
 import "dotenv/config";
 import { z } from "zod";
 
+/**
+ * z.coerce.boolean() coerces via `Boolean(value)`, so the *string* "false" (any non-empty
+ * string) coerces to `true` — a real footgun for env vars, which are always strings. This
+ * only treats "true"/"1" as true and everything else (including "false"/"0"/unset) as false.
+ */
+const boolEnv = (defaultValue: boolean) =>
+  z.preprocess((val) => (typeof val === "string" ? val === "true" || val === "1" : val), z.boolean().default(defaultValue));
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
@@ -30,7 +38,7 @@ const EnvSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
   /** true = implicit TLS (typically port 465); false (default) = plain/STARTTLS (typically port 587) — matches how most providers (Gmail, Office365, SES, Mailgun SMTP) are configured out of the box. */
-  SMTP_SECURE: z.coerce.boolean().default(false),
+  SMTP_SECURE: boolEnv(false),
   EMAIL_FROM: z.string().default("CodeFerret <onboarding@codeferret.dev>"),
   /** Origin of the deployed web app, e.g. https://app.codeferret.dev — used only to build the /invite/:token and /runs/:id links inside emails. */
   FRONTEND_URL: z.string().url().optional(),
@@ -60,10 +68,13 @@ const EnvSchema = z.object({
   AZURE_OPENAI_API_KEY: z.string().optional(),
   AZURE_OPENAI_API_VERSION: z.string().default("2024-10-21"),
 
+  /** Error tracking (src/observability/sentry.ts) — optional. Unset = no-op, same silent-degrade pattern as SMTP/Razorpay above. */
+  SENTRY_DSN: z.string().optional(),
+
   /** Self-hosted zero-retention mode (DESIGN.md §11/§13) — when true, findings never retain a verbatim source-line snippet, only metadata. */
-  ZERO_RETENTION: z.coerce.boolean().default(false),
+  ZERO_RETENTION: boolEnv(false),
   /** Self-hosted license enforcement (DESIGN.md §11) — both unset = license checks skipped (normal SaaS deployment). */
-  SELF_HOSTED: z.coerce.boolean().default(false),
+  SELF_HOSTED: boolEnv(false),
   LICENSE_KEY: z.string().optional(),
   LICENSE_PUBLIC_KEY: z.string().optional(),
 

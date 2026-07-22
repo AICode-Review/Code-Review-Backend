@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: typecheck, test, build
+    runs-on: ubuntu-latest
+    # Dummy, non-secret placeholders — src/config.ts's env() is parsed lazily and only
+    # needs these six required fields to exist syntactically valid; the test suite never
+    # hits real Supabase/GitHub (fakeSupabase.ts + fakeRouter.ts throughout), and
+    # `npm run build` only type-compiles, it never executes env() at all. Verified locally
+    # against this exact env shape before adding this workflow.
+    env:
+      NODE_ENV: test
+      SUPABASE_URL: https://dummy.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: dummy
+      DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
+      GITHUB_APP_ID: "1"
+      GITHUB_PRIVATE_KEY: ZHVtbXk=
+      GITHUB_WEBHOOK_SECRET: dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # No-op (skipped, not failed) until RAILWAY_TOKEN exists in this repo's
+  # Settings > Secrets and variables > Actions (Railway dashboard > Account Settings > Tokens).
+  deploy:
+    name: deploy (Railway)
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for RAILWAY_TOKEN
+        id: check
+        run: echo "has_token=${{ secrets.RAILWAY_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+      - if: steps.check.outputs.has_token == 'true'
+        run: npx -y @railway/cli up --service backend --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}

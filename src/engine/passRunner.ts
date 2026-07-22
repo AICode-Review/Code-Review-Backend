@@ -32,8 +32,8 @@ export interface PassResult {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
-  /** Specialist passes always route to Anthropic (DESIGN.md §8). */
-  provider: "anthropic";
+  /** Specialist passes prefer Anthropic (DESIGN.md §8) but fall back to OpenAI when ANTHROPIC_API_KEY isn't configured — see llm/router.ts's modelFor(). Reflects whichever the router actually used, not a fixed assumption. */
+  provider: "anthropic" | "openai";
   /** true when the model's output failed schema validation even after a repair retry — pass contributed nothing, run continues. */
   dropped: boolean;
 }
@@ -136,7 +136,7 @@ export async function runPass(
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
     costUsd: result.costUsd,
-    provider: "anthropic",
+    provider: result.provider,
     dropped: result.data === null,
   };
 }
@@ -147,6 +147,11 @@ export interface RunAllPassesResult {
   anthropicCostUsd: number;
   openaiCostUsd: number;
   skippedPasses: PassName[];
+}
+
+function addCost(totals: { anthropicCostUsd: number; openaiCostUsd: number }, r: PassResult): void {
+  if (r.provider === "anthropic") totals.anthropicCostUsd += r.costUsd;
+  else totals.openaiCostUsd += r.costUsd;
 }
 
 /**
@@ -162,14 +167,14 @@ export async function runAllPasses(
 ): Promise<RunAllPassesResult> {
   const results: PassResult[] = [];
   let totalCostUsd = 0;
-  let anthropicCostUsd = 0;
+  const totals = { anthropicCostUsd: 0, openaiCostUsd: 0 };
   const skippedPasses: PassName[] = [];
 
   const required = await Promise.all(REQUIRED_PASSES.map((pass) => runPass(router, pass, ctx)));
   for (const r of required) {
     results.push(r);
     totalCostUsd += r.costUsd;
-    anthropicCostUsd += r.costUsd;
+    addCost(totals, r);
   }
 
   const optional: PassName[] = [...OPTIONAL_PASSES, ...(opts.rulebook.length > 0 ? (["style"] as const) : [])];
@@ -181,9 +186,8 @@ export async function runAllPasses(
     const r = await runPass(router, pass, ctx, pass === "style" ? opts.rulebook : undefined);
     results.push(r);
     totalCostUsd += r.costUsd;
-    anthropicCostUsd += r.costUsd;
+    addCost(totals, r);
   }
 
-  // Passes never call OpenAI — openaiCostUsd is always 0 here (skeptic costs land in verify/).
-  return { results, totalCostUsd, anthropicCostUsd, openaiCostUsd: 0, skippedPasses };
+  return { results, totalCostUsd, anthropicCostUsd: totals.anthropicCostUsd, openaiCostUsd: totals.openaiCostUsd, skippedPasses };
 }

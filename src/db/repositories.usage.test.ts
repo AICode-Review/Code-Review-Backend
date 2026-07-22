@@ -39,7 +39,7 @@ function seedOrg(opts: {
   repoId: string;
   prId: string;
   subscription?: { tier: string; status: string; seats: number };
-  runs: { status: string; started_at: string; blocked_reason?: string | null }[];
+  runs: { status: string; started_at: string; blocked_reason?: string | null; llm_cost_usd?: number }[];
 }): FakeTables {
   return {
     subscriptions: opts.subscription ? [{ org_id: opts.orgId, ...opts.subscription }] : [],
@@ -51,6 +51,7 @@ function seedOrg(opts: {
       status: r.status,
       started_at: r.started_at,
       blocked_reason: r.blocked_reason ?? null,
+      llm_cost_usd: r.llm_cost_usd ?? 0,
     })),
   };
 }
@@ -113,6 +114,23 @@ describe("getOrgUsage", () => {
     );
     const usage = await getOrgUsage(client, "org-1");
     expect(usage.used).toBe(1);
+  });
+
+  it("excludes a failed run that never incurred any LLM spend (e.g. a config bug), but still counts a failed run that did", async () => {
+    const { client } = createFakeSupabase(
+      seedOrg({
+        orgId: "org-1",
+        repoId: "repo-1",
+        prId: "pr-1",
+        runs: [
+          { status: "completed", started_at: isoDaysAgo(1) },
+          { status: "failed", started_at: isoDaysAgo(1), llm_cost_usd: 0 }, // crashed before any model call
+          { status: "failed", started_at: isoDaysAgo(1), llm_cost_usd: 0.05 }, // real spend before it failed
+        ],
+      }),
+    );
+    const usage = await getOrgUsage(client, "org-1");
+    expect(usage.used).toBe(2);
   });
 
   it("excludes runs from a previous month", async () => {

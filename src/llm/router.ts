@@ -10,12 +10,36 @@ interface ModelChoice {
   model: string;
 }
 
+/** Bedrock (AWS_REGION) authenticates via AWS credentials, not ANTHROPIC_API_KEY — see anthropicClient.ts. */
+function anthropicAvailable(): boolean {
+  const e = env();
+  return Boolean(e.ANTHROPIC_API_KEY) || Boolean(e.AWS_REGION);
+}
+
+/** Azure OpenAI (AZURE_OPENAI_ENDPOINT) is a distinct auth path from a direct OPENAI_API_KEY — see openaiClientFactory.ts. */
+function openaiAvailable(): boolean {
+  const e = env();
+  return Boolean(e.OPENAI_API_KEY) || Boolean(e.AZURE_OPENAI_ENDPOINT);
+}
+
+/**
+ * Preferred provider per task, falling back to whichever provider is actually configured
+ * when the preferred one isn't — "run on whatever key/credits are available" rather than
+ * hard-failing a whole review because one of the two providers is unset. The one real
+ * quality tradeoff: verify.cross_exam's whole point is an independent second opinion from
+ * a *different* vendor than whatever wrote the passes; falling back to the same provider
+ * for both loses that independence (still better than no verification at all). Reuses
+ * MODEL_SKEPTIC for every OpenAI-fallback task — there's no separate "OpenAI frontier/mid"
+ * tier configured, unlike Anthropic's two-tier MODEL_FRONTIER/MODEL_MID split.
+ */
 function modelFor(task: TaskKind): ModelChoice {
   switch (task) {
     case "pass.logic":
     case "pass.security":
     case "pass.contracts":
-      return { provider: "anthropic", model: env().MODEL_FRONTIER };
+      return anthropicAvailable()
+        ? { provider: "anthropic", model: env().MODEL_FRONTIER }
+        : { provider: "openai", model: env().MODEL_SKEPTIC };
     case "pass.concurrency":
     case "pass.errors":
     case "pass.tests":
@@ -23,9 +47,13 @@ function modelFor(task: TaskKind): ModelChoice {
     case "rulebook.compile":
     case "chat.reply":
     case "verify.repro_gen":
-      return { provider: "anthropic", model: env().MODEL_MID };
+      return anthropicAvailable()
+        ? { provider: "anthropic", model: env().MODEL_MID }
+        : { provider: "openai", model: env().MODEL_SKEPTIC };
     case "verify.cross_exam":
-      return { provider: "openai", model: env().MODEL_SKEPTIC };
+      return openaiAvailable()
+        ? { provider: "openai", model: env().MODEL_SKEPTIC }
+        : { provider: "anthropic", model: env().MODEL_FRONTIER };
   }
 }
 

@@ -8,6 +8,7 @@ import {
   formatUsageLimitMessage,
   getActiveRulebookRules,
   getOrgOwnerEmail,
+  getOrgPlan,
   getOrgUsage,
   getPriorFindingFeedback,
   getRepoConfig,
@@ -57,6 +58,15 @@ function prWebUrl(pr: PrRef): string {
 
 /** Thrown when a newer push superseded this run — caught below and treated as a clean stop, never a failure. */
 class RunCancelledError extends Error {}
+
+/**
+ * Execution-sandbox verification (Pricing page: Pro+) — degrades exactly like a genuinely
+ * unavailable Docker host (verify/sandbox.ts's own `available: false` path), so a free-tier
+ * finding still gets cross-exam-only verification rather than failing outright.
+ */
+async function disabledSandbox(): Promise<{ available: boolean; reproduced: boolean; output: string }> {
+  return { available: false, reproduced: false, output: "" };
+}
 
 /** DESIGN.md §6.1: bail out (no wasted LLM spend, no stale post) if a newer push has cancelled this run. */
 async function throwIfCancelled(db: ReturnType<typeof getDb>, runId: string): Promise<void> {
@@ -215,6 +225,7 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       results,
       totalCostUsd: passCostUsd,
       anthropicCostUsd: passAnthropicCostUsd,
+      openaiCostUsd: passOpenaiCostUsd,
       skippedPasses,
     } = await runAllPasses(router, ctx, {
       rulebook: rulebookRules,
@@ -233,12 +244,17 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
     let verifyAnthropicCostUsd = 0;
     let verifyOpenaiCostUsd = 0;
 
+    // Execution-sandbox verification is Pro+ (Pricing page) — free-tier orgs verify via
+    // cross-examination only, same as when Docker itself is unavailable.
+    const orgPlan = await getOrgPlan(db, orgId);
+    const sandboxOverride = orgPlan === "free" ? disabledSandbox : undefined;
+
     for (const m of merged) {
       if (passCostUsd + verifyCostUsd >= costCap) {
         // Cost cap reached — remaining candidates are dropped from this run entirely (never posted unverified).
         continue;
       }
-      const outcome = await verifyFinding(router, m, filesByPath);
+      const outcome = await verifyFinding(router, m, filesByPath, sandboxOverride);
       verifyCostUsd += outcome.costUsd;
       verifyAnthropicCostUsd += outcome.anthropicCostUsd;
       verifyOpenaiCostUsd += outcome.openaiCostUsd;
@@ -275,7 +291,7 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
 
     const totalCostUsd = passCostUsd + verifyCostUsd;
     const anthropicCostUsd = passAnthropicCostUsd + verifyAnthropicCostUsd;
-    const openaiCostUsd = verifyOpenaiCostUsd;
+    const openaiCostUsd = passOpenaiCostUsd + verifyOpenaiCostUsd;
     const { posted, digest, rejected } = selectForDelivery(deliverable, repoConfig.commentBudget);
 
     const existingComments = await adapter.listOwnComments(pr);
