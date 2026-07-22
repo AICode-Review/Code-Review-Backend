@@ -54,7 +54,11 @@ function extractGithubIdentity(supaUser: {
 export async function verifyBearerToken(token: string): Promise<AuthedUser | null> {
   const db = getDb();
   const { data, error } = await db.auth.getUser(token);
-  if (error || !data.user) return null;
+  if (error || !data.user) {
+    // TEMPORARY diagnostic logging — remove once the Render/Vercel deploy issue is resolved.
+    console.error("[verifyBearerToken] db.auth.getUser failed:", error?.message ?? "no error, but no user returned");
+    return null;
+  }
   const supaUser = data.user;
   const { login: githubLogin, id: githubId } = extractGithubIdentity(supaUser);
 

@@ -15,7 +15,11 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply): Pro
     await reply.code(401).send({ error: "missing bearer token" });
     return;
   }
-  const user = await verifyBearerToken(token).catch(() => null);
+  const user = await verifyBearerToken(token).catch((err) => {
+    // TEMPORARY diagnostic logging — remove once the Render/Vercel deploy issue is resolved.
+    req.log.error({ err }, "[requireAuth] verifyBearerToken threw");
+    return null;
+  });
   if (!user) {
     await reply.code(401).send({ error: "invalid or expired session" });
     return;
