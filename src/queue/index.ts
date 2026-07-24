@@ -59,7 +59,12 @@ let boss: PgBoss | undefined;
 
 export async function getBoss(): Promise<PgBoss> {
   if (!boss) {
-    boss = new PgBoss({ connectionString: env().DATABASE_URL });
+    // Supabase's session-mode pooler caps this DATABASE_URL at 15 total connections
+    // shared across every client (server + worker are separate processes, each with
+    // their own pg-boss instance/pool, plus any local/dev/diagnostic connections).
+    // pg-boss's own pg.Pool defaults to max:10 per instance, so two uncapped
+    // instances alone can hit 20 and blow the cap — cap each process's pool small.
+    boss = new PgBoss({ connectionString: env().DATABASE_URL, max: 4 });
     boss.on("error", (err) => console.error("[pg-boss]", err));
     await boss.start();
     for (const name of Object.values(JOBS)) {
