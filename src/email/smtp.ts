@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import type SMTPTransport from "nodemailer/lib/smtp-transport/index.js";
 import { env } from "../config.js";
 
 export interface EmailMessage {
@@ -33,12 +34,21 @@ export async function sendEmail(message: EmailMessage): Promise<EmailSendResult>
 
   const e = env();
   try {
-    const transport = nodemailer.createTransport({
+    // `family` isn't in @types/nodemailer's Options interface (though nodemailer passes
+    // it straight through to Node's net/tls connect, which does support it) — assigning
+    // to a typed variable first avoids the excess-property check an inline literal would
+    // trigger, without resorting to `any`.
+    const options: SMTPTransport.Options & { family?: number } = {
       host: e.SMTP_HOST,
       port: e.SMTP_PORT,
       secure: e.SMTP_SECURE,
       auth: { user: e.SMTP_USER, pass: e.SMTP_PASS },
-    });
+      // Some hosts (e.g. Render) have no outbound IPv6 route, but SMTP hosts like
+      // smtp.gmail.com resolve to an IPv6 address first — forcing IPv4 avoids an
+      // immediate ENETUNREACH instead of falling back.
+      family: 4,
+    };
+    const transport = nodemailer.createTransport(options);
     await transport.sendMail({
       from: e.EMAIL_FROM,
       to: message.to,
