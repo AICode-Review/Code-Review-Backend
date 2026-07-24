@@ -6,6 +6,7 @@ import {
   getPlatformOverview,
   listAuditLogAdmin,
   listOrgsAdmin,
+  getRunAdmin,
   listRunsAdmin,
   listSubscriptionsAdmin,
   listUsersAdmin,
@@ -170,6 +171,20 @@ describe("listRunsAdmin", () => {
   it("returns an empty list when there are no runs at all", async () => {
     const { client } = createFakeSupabase({ review_runs: [] });
     expect(await listRunsAdmin(client)).toEqual([]);
+  });
+});
+
+describe("getRunAdmin", () => {
+  it("returns a single run with pr/repo/org context", async () => {
+    const { client } = createFakeSupabase(structuredClone(BASE));
+    const run = await getRunAdmin(client, "run-1");
+    expect(run?.id).toBe("run-1");
+    expect(run?.orgName).toBe("Acme Pro");
+  });
+
+  it("returns null when the run does not exist", async () => {
+    const { client } = createFakeSupabase(structuredClone(BASE));
+    expect(await getRunAdmin(client, "missing")).toBeNull();
   });
 });
 

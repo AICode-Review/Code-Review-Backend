@@ -360,6 +360,13 @@ export async function listRunsAdmin(db: SupabaseClient, opts: AdminPageOpts = {}
   return attachRunContext(db, (runRows ?? []) as RunRow[]);
 }
 
+export async function getRunAdmin(db: SupabaseClient, runId: string): Promise<AdminRunSummary | null> {
+  const { data } = await db.from("review_runs").select(RUN_SELECT).eq("id", runId).maybeSingle();
+  if (!data) return null;
+  const [run] = await attachRunContext(db, [data as RunRow]);
+  return run ?? null;
+}
+
 export interface AdminAuditLogEntry {
   id: string;
   orgId: string | null;

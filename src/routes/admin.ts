@@ -11,6 +11,7 @@ import {
   getPlatformOverview,
   listAuditLogAdmin,
   listOrgsAdmin,
+  getRunAdmin,
   listRunsAdmin,
   listSubscriptionsAdmin,
   listUsersAdmin,
@@ -157,6 +158,12 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     const limit = req.query.limit ? Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50)) : undefined;
     const runs = await listRunsAdmin(getDb(), { before: req.query.before, limit });
     return reply.send({ runs });
+  });
+
+  app.get<{ Params: { id: string } }>("/api/admin/runs/:id", async (req, reply) => {
+    const run = await getRunAdmin(getDb(), req.params.id);
+    if (!run) return reply.code(404).send({ error: "not_found" });
+    return reply.send(run);
   });
 
   app.get<{ Querystring: { before?: string; limit?: string } }>("/api/admin/audit", async (req, reply) => {
