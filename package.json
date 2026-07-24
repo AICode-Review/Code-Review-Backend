@@ -13,6 +13,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/copyPrompts.mjs",
     "start": "node dist/server.js",
     "start:worker": "node dist/worker.js",
+    "start:combined": "concurrently -n server,worker -c blue,magenta \"node dist/server.js\" \"node dist/worker.js\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx src/db/migrate.ts"
@@ -25,6 +26,7 @@
     "@octokit/app": "^15.1.0",
     "@sentry/node": "^10.67.0",
     "@supabase/supabase-js": "^2.47.0",
+    "concurrently": "^9.1.0",
     "dotenv": "^16.4.5",
     "fastify": "^5.1.0",
     "jsonwebtoken": "^9.0.3",
@@ -43,7 +45,6 @@
     "@types/node": "^22.10.0",
     "@types/nodemailer": "^7.0.12",
     "@types/pg": "^8.11.10",
-    "concurrently": "^9.1.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^3.0.0"
