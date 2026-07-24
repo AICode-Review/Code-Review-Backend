@@ -13,6 +13,7 @@ import type {
 } from "../../types/domain.js";
 import { getDb } from "../../db/client.js";
 import { getCachedInstallationToken } from "../../db/repositories.js";
+import { bitbucketAuthorizationHeader, parseBitbucketCredential } from "./auth.js";
 
 const API_BASE = "https://api.bitbucket.org/2.0";
 
@@ -79,7 +80,11 @@ function repoRef(repo: z.infer<typeof RepositoryRefSchema>): RepoRef {
     externalId: repo.uuid,
     owner: repo.workspace.slug,
     name: repoSlug(repo.full_name),
-    orgExternalId: repo.workspace.uuid,
+    // Must match connectBitbucketWorkspace, which keys orgs + tokens by workspace *slug*
+    // (not UUID). Using the UUID here used to create a second orphan org on webhook
+    // delivery that the signed-in user was never a member of — so connected workspaces
+    // looked empty even after PR events arrived.
+    orgExternalId: repo.workspace.slug,
     orgName: repo.workspace.slug,
     defaultBranch: repo.mainbranch?.name,
     isPrivate: repo.is_private,
@@ -195,7 +200,7 @@ export class BitbucketAdapter implements PlatformAdapter {
     const res = await fetch(`${API_BASE}${path}`, {
       method,
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: bitbucketAuthorizationHeader(token),
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -225,7 +230,7 @@ export class BitbucketAdapter implements PlatformAdapter {
     const token = await this.accessToken(pr.repo);
     const res = await fetch(
       `${API_BASE}/repositories/${pr.repo.owner}/${pr.repo.name}/pullrequests/${pr.number}/diff`,
-      { headers: { Authorization: `Bearer ${token}` } },
+      { headers: { Authorization: bitbucketAuthorizationHeader(token) } },
     );
     if (!res.ok) throw new Error(`Bitbucket diff fetch failed: ${res.status}`);
     return res.text();
@@ -234,14 +239,15 @@ export class BitbucketAdapter implements PlatformAdapter {
   async getFile(repo: RepoRef, path: string, sha: string): Promise<string> {
     const token = await this.accessToken(repo);
     const res = await fetch(`${API_BASE}/repositories/${repo.owner}/${repo.name}/src/${sha}/${path}`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: bitbucketAuthorizationHeader(token) },
     });
     if (!res.ok) throw new Error(`Bitbucket file fetch failed for ${path}@${sha}: ${res.status}`);
     return res.text();
   }
 
   async cloneUrl(repo: RepoRef): Promise<string> {
-    const token = await this.accessToken(repo);
+    const raw = await this.accessToken(repo);
+    const { token } = parseBitbucketCredential(raw);
     return `https://x-token-auth:${token}@bitbucket.org/${repo.owner}/${repo.name}.git`;
   }
 

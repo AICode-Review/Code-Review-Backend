@@ -48,7 +48,7 @@ describe("parseEvent", () => {
         number: 42,
         title: "Fix the thing",
         author: "octocat",
-        repo: { platform: "bitbucket", owner: "acme-team", name: "payments-api", externalId: "{repo-uuid}", orgExternalId: "{workspace-uuid}" },
+        repo: { platform: "bitbucket", owner: "acme-team", name: "payments-api", externalId: "{repo-uuid}", orgExternalId: "acme-team" },
       },
     });
   });

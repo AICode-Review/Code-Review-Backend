@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { OrgRef, PrRef, RepoRef } from "../types/domain.js";
 import { decryptToken, encryptToken, encryptionConfigured } from "../security/tokenCrypto.js";
 import { env } from "../config.js";
+import { bitbucketAuthorizationHeader, encodeBitbucketCredential, parseBitbucketCredential } from "../adapters/bitbucket/auth.js";
 
 interface Row {
   id: string;
@@ -496,9 +497,9 @@ export async function recordAudit(
  */
 export async function connectBitbucketWorkspace(
   db: SupabaseClient,
-  args: { workspaceSlug: string; workspaceName: string; accessToken: string },
+  args: { workspaceSlug: string; workspaceName: string; accessToken: string; accountEmail: string },
   ownerUserId: string,
-): Promise<{ orgId: string }> {
+): Promise<{ orgId: string; repoCount: number; syncError?: string }> {
   const orgRow = unwrap<Row>(
     await db
       .from("orgs")
@@ -516,9 +517,197 @@ export async function connectBitbucketWorkspace(
     .upsert({ org_id: orgRow.id, user_id: ownerUserId, role: "owner" }, { onConflict: "org_id,user_id" });
   if (memberError) throw new Error(`db: failed to grant ownership of bitbucket org: ${memberError.message}`);
 
-  await cacheInstallationToken(db, "bitbucket", args.workspaceSlug, args.accessToken, new Date(Date.now() + 365 * 86_400_000));
+  const credential = encodeBitbucketCredential(args.accessToken, args.accountEmail);
+  await cacheInstallationToken(db, "bitbucket", args.workspaceSlug, credential, new Date(Date.now() + 365 * 86_400_000));
 
-  return { orgId: orgRow.id };
+  // Import workspace repos now. Surface sync failures to the client — silent 0-count
+  // made private-repo / wrong-auth failures look like "Bitbucket just has no repos".
+  try {
+    const repoCount = await syncBitbucketWorkspaceRepos(
+      db,
+      orgRow.id as string,
+      args.workspaceSlug,
+      credential,
+    );
+    if (repoCount === 0) {
+      const hasEmail = Boolean(parseBitbucketCredential(credential).email);
+      return {
+        orgId: orgRow.id as string,
+        repoCount: 0,
+        syncError: hasEmail
+          ? `Bitbucket authenticated but returned 0 repos for workspace "${args.workspaceSlug}". Confirm the slug is correct, the token includes read:repository:bitbucket, and that account can see the private repo in Bitbucket.`
+          : `Bitbucket returned 0 repos. For a personal API token you must enter your real Atlassian account email (not the placeholder), then reconnect.`,
+      };
+    }
+    return { orgId: orgRow.id as string, repoCount };
+  } catch (err) {
+    const syncError = err instanceof Error ? err.message : String(err);
+    console.error(`[bitbucket] repo sync failed for workspace "${args.workspaceSlug}":`, syncError);
+    return { orgId: orgRow.id as string, repoCount: 0, syncError };
+  }
+}
+
+export interface BitbucketWorkspaceSummary {
+  orgId: string;
+  name: string;
+  workspaceSlug: string;
+  role: string;
+  plan: string;
+  repoCount: number;
+  accountEmail: string | null;
+  tokenPresent: boolean;
+  tokenExpiresAt: string | null;
+}
+
+/** Every Bitbucket workspace the user belongs to, with non-secret connection metadata for the Settings UI. */
+export async function listBitbucketWorkspacesForUser(
+  db: SupabaseClient,
+  userId: string,
+): Promise<BitbucketWorkspaceSummary[]> {
+  const { data, error } = await db
+    .from("org_members")
+    .select("role, orgs(id, name, plan, platform, external_id)")
+    .eq("user_id", userId);
+  if (error) throw new Error(`db: failed to list bitbucket workspaces: ${error.message}`);
+
+  type MemberRow = {
+    role: string;
+    orgs: {
+      id: string;
+      name: string;
+      plan: string;
+      platform: string;
+      external_id: string;
+    } | null;
+  };
+
+  const bitbucketOrgs = ((data ?? []) as unknown as MemberRow[])
+    .filter((row) => row.orgs?.platform === "bitbucket")
+    .map((row) => ({ role: row.role, org: row.orgs! }));
+
+  const summaries: BitbucketWorkspaceSummary[] = [];
+  for (const { role, org } of bitbucketOrgs) {
+    const { count } = await db
+      .from("repos")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", org.id);
+
+    const { data: tokenRow } = await db
+      .from("platform_tokens")
+      .select("encrypted_token, expires_at")
+      .eq("org_id", org.id)
+      .eq("platform", "bitbucket")
+      .maybeSingle();
+
+    let accountEmail: string | null = null;
+    let tokenPresent = false;
+    if (tokenRow?.encrypted_token && encryptionConfigured()) {
+      try {
+        const parsed = parseBitbucketCredential(decryptToken(tokenRow.encrypted_token as string));
+        tokenPresent = Boolean(parsed.token);
+        accountEmail = parsed.email ?? null;
+      } catch {
+        tokenPresent = true; // row exists but decrypt failed — still show as connected
+      }
+    }
+
+    summaries.push({
+      orgId: org.id,
+      name: org.name,
+      workspaceSlug: org.external_id,
+      role,
+      plan: org.plan,
+      repoCount: count ?? 0,
+      accountEmail,
+      tokenPresent,
+      tokenExpiresAt: (tokenRow?.expires_at as string | null | undefined) ?? null,
+    });
+  }
+
+  return summaries.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+type BitbucketRepoListItem = {
+  uuid: string;
+  name: string;
+  slug?: string;
+  is_private?: boolean;
+  mainbranch?: { name?: string } | null;
+  workspace?: { slug?: string };
+};
+
+/** Lists every repo in a Bitbucket workspace and upserts them under the CodeFerret org. */
+async function syncBitbucketWorkspaceRepos(
+  db: SupabaseClient,
+  orgId: string,
+  workspaceSlug: string,
+  credential: string,
+): Promise<number> {
+  const auth = bitbucketAuthorizationHeader(credential);
+  const repos = await listBitbucketReposForWorkspace(workspaceSlug, auth);
+
+  let count = 0;
+  for (const r of repos) {
+    const { error } = await db.from("repos").upsert(
+      {
+        org_id: orgId,
+        external_id: r.uuid,
+        name: r.slug ?? r.name,
+        owner: workspaceSlug,
+        default_branch: r.mainbranch?.name ?? "main",
+        is_private: r.is_private ?? true,
+      },
+      { onConflict: "org_id,external_id" },
+    );
+    if (error) throw new Error(`db: failed to upsert bitbucket repo ${r.slug ?? r.name}: ${error.message}`);
+    count += 1;
+  }
+  return count;
+}
+
+async function listBitbucketReposForWorkspace(
+  workspaceSlug: string,
+  authorization: string,
+): Promise<BitbucketRepoListItem[]> {
+  const primary = await fetchBitbucketRepoPages(
+    `https://api.bitbucket.org/2.0/repositories/${encodeURIComponent(workspaceSlug)}?pagelen=100&role=member`,
+    authorization,
+  );
+  if (primary.length > 0) return primary;
+
+  // Fallback: repos the token can access, filtered to this workspace.
+  const allAccessible = await fetchBitbucketRepoPages(
+    `https://api.bitbucket.org/2.0/repositories?pagelen=100&role=member`,
+    authorization,
+  );
+  return allAccessible.filter((r) => (r.workspace?.slug ?? "").toLowerCase() === workspaceSlug.toLowerCase());
+}
+
+async function fetchBitbucketRepoPages(startUrl: string, authorization: string): Promise<BitbucketRepoListItem[]> {
+  const out: BitbucketRepoListItem[] = [];
+  let url: string | null = startUrl;
+
+  while (url) {
+    const res = await fetch(url, {
+      headers: { Authorization: authorization, Accept: "application/json" },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(
+          `Bitbucket rejected the token (${res.status}). Private repos need read:repository:bitbucket. ` +
+            `Personal API tokens require your real Atlassian account email. ` +
+            body.slice(0, 200),
+        );
+      }
+      throw new Error(`Bitbucket list repositories failed: ${res.status} ${body.slice(0, 200)}`);
+    }
+    const body = (await res.json()) as { values?: BitbucketRepoListItem[]; next?: string };
+    out.push(...(body.values ?? []));
+    url = body.next ?? null;
+  }
+
+  return out;
 }
 
 async function getOrgIdByExternal(db: SupabaseClient, platform: string, externalId: string): Promise<string | null> {

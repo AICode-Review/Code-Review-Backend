@@ -26,6 +26,7 @@ import {
   getRepoOrgId,
   getRepoRefByName,
   getRunOrgId,
+  listBitbucketWorkspacesForUser,
   recordAudit,
   upsertPrChain,
   type OrgPlan,
@@ -82,8 +83,13 @@ const CheckoutSchema = z.object({
 const BitbucketConnectSchema = z.object({
   workspaceSlug: z.string().min(1),
   workspaceName: z.string().min(1),
-  /** A Bitbucket Workspace Access Token (Repository/Project/Workspace admin settings) — not an OAuth flow, mirroring how self-hosted GitHub Apps are configured with a static credential. */
+  /**
+   * Personal API token (Account settings → API tokens) or Workspace Access Token.
+   * Personal API tokens need accountEmail (Bitbucket HTTP Basic).
+   */
   accessToken: z.string().min(1),
+  /** Atlassian account email used for Bitbucket login — required for personal API tokens. */
+  accountEmail: z.string().email(),
 });
 
 const PRESET_CONFIG: Record<string, { commentBudget: number; failOnCritical: boolean }> = {
@@ -150,6 +156,12 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
 
   // ------------------------------------------------------------- bitbucket
 
+  app.get("/api/bitbucket/workspaces", async (req, reply) => {
+    const db = getDb();
+    const workspaces = await listBitbucketWorkspacesForUser(db, req.authedUser!.id);
+    return reply.send({ workspaces });
+  });
+
   app.post<{ Body: unknown }>("/api/bitbucket/connect", async (req, reply) => {
     if (!encryptionConfigured()) {
       return reply.code(501).send({ error: "ENCRYPTION_KEY is not configured on this deployment — Bitbucket tokens cannot be stored" });
@@ -158,9 +170,18 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
 
     const db = getDb();
-    const { orgId } = await connectBitbucketWorkspace(db, parsed.data, req.authedUser!.id);
-    await recordAudit(db, orgId, actorLabel(req.authedUser!), "bitbucket.connected", parsed.data.workspaceSlug);
-    return reply.send({ orgId });
+    const result = await connectBitbucketWorkspace(db, parsed.data, req.authedUser!.id);
+    await recordAudit(db, result.orgId, actorLabel(req.authedUser!), "bitbucket.connected", parsed.data.workspaceSlug);
+    return reply.send({
+      ...result,
+      workspace: {
+        orgId: result.orgId,
+        name: parsed.data.workspaceName,
+        workspaceSlug: parsed.data.workspaceSlug,
+        accountEmail: parsed.data.accountEmail,
+        repoCount: result.repoCount,
+      },
+    });
   });
 
   // ---------------------------------------------------------------- analytics
