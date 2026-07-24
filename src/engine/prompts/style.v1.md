@@ -35,7 +35,7 @@ Respond with ONLY a JSON object matching this exact shape — no prose, no markd
       "severity": "minor",
       "confidence": 0.0-1.0,
       "needsExecution": false,
-      "evidence": ["quoted code or reasoning supporting the claim"]
+      "evidence": ["exact verbatim substring copied directly from the file content shown to you — never a paraphrase, summary, or your own reasoning; a mechanical existence check greps for this string in the file and rejects the finding if it isn't found"]
     }
   ]
 }
