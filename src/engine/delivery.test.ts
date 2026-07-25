@@ -112,7 +112,22 @@ describe("buildSummaryMarkdown", () => {
     expect(md).toContain("+10/-2");
     expect(md).toContain("skipped tests (cost cap)");
     expect(md).toContain("$0.123");
-    expect(md).toContain("all verified before posting");
+    // 3 total candidates (1 posted + 1 digest = 2 verified, 1 rejected) — must not claim
+    // "all verified" while a rejected candidate exists in the same summary.
+    expect(md).toContain("3 candidate findings (2 verified, 1 rejected)");
+    expect(md).not.toContain("all verified before posting");
+  });
+
+  it("reports accurate verified/rejected counts in the footer, not a blanket 'all verified' claim", () => {
+    const md = buildSummaryMarkdown({
+      prStats: { files: 1, additions: 1, deletions: 0 },
+      posted: [finding({ severity: "critical" })],
+      digest: [],
+      rejected: [finding({ verificationStatus: "rejected" }), finding({ verificationStatus: "rejected" })],
+      skippedPasses: [],
+      costUsd: 0.05,
+    });
+    expect(md).toContain("3 candidate findings (1 verified, 2 rejected)");
   });
 
   it("says no high-severity findings when nothing was posted", () => {

@@ -135,12 +135,16 @@ export function buildSummaryMarkdown(args: SummaryArgs): string {
     );
   }
 
-  const total = args.posted.length + args.digest.length + args.rejected.length;
+  const verifiedTotal = args.posted.length + args.digest.length;
+  const total = verifiedTotal + args.rejected.length;
   const passNote = args.skippedPasses.length > 0 ? ` · skipped ${args.skippedPasses.join(", ")} (cost cap)` : "";
   const staleNote = args.staleIndex ? " · repo index is stale" : "";
+  // Was previously "X candidate findings, all verified before posting" — factually wrong
+  // whenever any candidate was rejected, since `total` includes rejected ones (visibly
+  // self-contradicting the "N candidates rejected during verification" section above it).
   lines.push(
     "---",
-    `_CodeFerret · ${total} candidate finding${total === 1 ? "" : "s"}, all verified before posting · ~$${args.costUsd.toFixed(3)}${passNote}${staleNote}_`,
+    `_CodeFerret · ${total} candidate finding${total === 1 ? "" : "s"} (${verifiedTotal} verified, ${args.rejected.length} rejected) · ~$${args.costUsd.toFixed(3)}${passNote}${staleNote}_`,
   );
 
   return lines.join("\n");
