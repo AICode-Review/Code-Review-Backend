@@ -64,6 +64,30 @@ describe("getContext", () => {
     expect(result.relatedTests[0]?.path).toBe("src/auth.test.ts");
   });
 
+  it("finds a related test with a DIFFERENT name whose signature calls the changed symbol (not just a same-named declaration)", async () => {
+    const rows = [
+      { path: "src/auth.ts", name: "authenticate", kind: "function", signature: "function authenticate(token)", start_line: 10, end_line: 20 },
+      {
+        path: "src/auth.test.ts",
+        name: "shouldRejectExpiredToken",
+        kind: "function",
+        signature: "const shouldRejectExpiredToken = () => authenticate(expiredToken)",
+        start_line: 1,
+        end_line: 3,
+      },
+    ];
+    const result = await getContext(fakeDb(rows), "repo-1", ["authenticate"]);
+    expect(result.relatedTests.map((t) => t.name)).toEqual(["shouldRejectExpiredToken"]);
+    expect(result.callers).toEqual([]); // it's in a test path, so it belongs in relatedTests, not callers
+  });
+
+  it("detects a .spec.ts test file, not just .test.ts (broadened path check)", async () => {
+    const rows = [{ path: "src/auth.spec.ts", name: "authenticate", kind: "function", signature: null, start_line: 1, end_line: 3 }];
+    const result = await getContext(fakeDb(rows), "repo-1", ["authenticate"]);
+    expect(result.relatedTests).toHaveLength(1);
+    expect(result.definitions).toEqual([]);
+  });
+
   it("does not surface a changed symbol's own definition as its own caller", async () => {
     const rows = [{ path: "src/auth.ts", name: "authenticate", kind: "function", signature: "function authenticate(token)", start_line: 10, end_line: 20 }];
     const result = await getContext(fakeDb(rows), "repo-1", ["authenticate"]);

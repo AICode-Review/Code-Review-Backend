@@ -24,6 +24,17 @@ export interface RepoContext {
   similarChunks: SimilarChunk[];
 }
 
+/**
+ * Broadened from a bare `/test/i` substring check — that missed the very common
+ * `.spec.ts`/`.spec.js` naming convention (Angular/Jasmine/Karma) entirely, since
+ * "spec" doesn't contain the word "test". Still a blunt substring match (already the
+ * existing precedent here, e.g. it'll also match a file like `latest.ts`) — this is a
+ * best-effort signal, not authoritative.
+ */
+function isTestPath(path: string): boolean {
+  return /test|spec/i.test(path);
+}
+
 function toSymbolContext(row: Record<string, unknown>): SymbolContext {
   return {
     path: row["path"] as string,
@@ -37,10 +48,13 @@ function toSymbolContext(row: Record<string, unknown>): SymbolContext {
 
 /**
  * DESIGN.md §7 query API: for a set of changed symbol names, find their
- * definitions elsewhere in the repo, likely callers (best-effort — same
- * name referenced in a different file), and related tests (path heuristic),
- * plus embedding-similar chunks for one representative snippet of changed
- * code. Wired into the review pipeline via engine/contextAssembly.ts, which
+ * definitions elsewhere in the repo, likely callers (best-effort — a
+ * different-named declaration whose one-line signature references a changed
+ * name), and related tests (a same-name declaration in a test-looking path,
+ * merged with test-path declarations from the same signature-reference
+ * search used for callers), plus embedding-similar chunks for one
+ * representative snippet of changed code. Wired into the review pipeline via
+ * engine/contextAssembly.ts, which
  * enforces the 60s timeout (DESIGN.md §7) and treats any failure here as
  * "proceed without cross-file context," never a review-blocking error.
  */
@@ -65,25 +79,30 @@ export async function getContext(
     .in("name", changedSymbolNames.length > 0 ? changedSymbolNames : ["__none__"]);
 
   const rows = (symbolRows ?? []) as Record<string, unknown>[];
-  const definitions = rows.filter((r) => !/test/i.test(r["path"] as string)).map(toSymbolContext);
-  const relatedTests = rows.filter((r) => /test/i.test(r["path"] as string)).map(toSymbolContext);
+  const definitions = rows.filter((r) => !isTestPath(r["path"] as string)).map(toSymbolContext);
+  const nameMatchedTests = rows.filter((r) => isTestPath(r["path"] as string)).map(toSymbolContext);
 
-  // Best-effort "callers": symbols ANYWHERE in the repo (not just ones sharing a
-  // changed name) whose one-line declaration signature references a changed name —
-  // e.g. a `class Handler extends BaseHandler`/`implements Foo` clause, or a
-  // single-line arrow function whose expression body is a call
+  // Best-effort "callers"/"related tests": symbols ANYWHERE in the repo (not just
+  // ones sharing a changed name) whose one-line declaration signature references a
+  // changed name — e.g. a `class Handler extends BaseHandler`/`implements Foo`
+  // clause, or a single-line arrow function whose expression body is a call
   // (`const validate = (x) => checkInput(x)`). indexer/symbols.ts only stores each
   // declaration's FIRST LINE, not its full body, so this can never see a call
   // buried inside a multi-line function — a real call graph needs the import-graph
   // edges in symbols.meta, not yet populated by v1. This MUST be its own query, not
-  // a further filter over the name-matched rows above: a genuine caller almost
-  // always has a *different* name than the symbol it calls, so pre-filtering to
-  // `.in("name", changedSymbolNames)` would exclude it before this check ever runs.
-  // A separate try/catch (rather than folding into the query above) so a failure
-  // here — e.g. this being run against a client that doesn't support `.or()` — only
-  // costs the callers portion, matching how an embedding/RPC failure below only
-  // costs similarChunks, never definitions/relatedTests.
+  // a further filter over the name-matched rows above: a genuine caller (or test
+  // that exercises the changed code) almost always has a *different* name than the
+  // symbol it calls — e.g. a test file for `authenticate()` typically doesn't
+  // declare its own top-level `authenticate` symbol, it just calls the imported
+  // one — so pre-filtering to `.in("name", changedSymbolNames)` (as the query above
+  // does for `definitions`) would exclude it before this check ever runs. Split by
+  // path into `callers` vs. a second related-tests signal, merged with the
+  // name-matched one above. A separate try/catch (rather than folding into the
+  // query above) so a failure here — e.g. this being run against a client that
+  // doesn't support `.or()` — only costs these two fields, matching how an
+  // embedding/RPC failure below only costs similarChunks, never definitions.
   let callers: SymbolContext[] = [];
+  let signatureMatchedTests: SymbolContext[] = [];
   if (safeNames.length > 0) {
     try {
       const { data: callerRows } = await db
@@ -93,14 +112,28 @@ export async function getContext(
         .or(safeNames.map((n) => `signature.ilike.%${n}%`).join(","))
         .limit(50);
       // A row whose own name is one of the changed names is already surfaced via
-      // `definitions` above — exclude it here so the same declaration doesn't also
-      // show up as its own "caller".
-      callers = ((callerRows ?? []) as Record<string, unknown>[])
+      // `definitions`/`nameMatchedTests` above — exclude it here so the same
+      // declaration doesn't also show up as its own "caller".
+      const matched = ((callerRows ?? []) as Record<string, unknown>[])
         .filter((r) => !safeNames.includes(r["name"] as string))
         .map(toSymbolContext);
+      callers = matched.filter((s) => !isTestPath(s.path));
+      signatureMatchedTests = matched.filter((s) => isTestPath(s.path));
     } catch {
-      // Leave callers empty — definitions/relatedTests are still valid.
+      // Leave both empty — definitions/nameMatchedTests are still valid.
     }
+  }
+
+  // Merge the two related-tests signals (same-name symbol declared in a test file,
+  // or a test file's declaration whose signature references a changed name),
+  // deduped in case a row satisfies both.
+  const seenTests = new Set<string>();
+  const relatedTests: SymbolContext[] = [];
+  for (const s of [...nameMatchedTests, ...signatureMatchedTests]) {
+    const key = `${s.path}:${s.name}:${s.startLine}`;
+    if (seenTests.has(key)) continue;
+    seenTests.add(key);
+    relatedTests.push(s);
   }
 
   // Symbol-based results above come from a separate, already-succeeded query — an
