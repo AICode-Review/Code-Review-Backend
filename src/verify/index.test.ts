@@ -161,6 +161,36 @@ describe("verifyFinding — sandbox execution (needsExecution)", () => {
     expect(outcome.method).toBe("cross_exam");
   });
 
+  it("skips the sandbox when the model's self-reported language doesn't match the file's actual language", async () => {
+    const router = createFakeRouter({
+      "verify.cross_exam": { verdict: "upheld", reasoning: "Confirmed via file inspection." },
+      // src/foo.ts -> sandboxLang "node", but the model reported "python" — a mismatch.
+      "verify.repro_gen": { canGenerate: true, language: "python", testCode: "import sys; sys.exit(1)" },
+    });
+    let called = false;
+    const runSandbox = async (): Promise<{ available: boolean; reproduced: boolean; output: string }> => {
+      called = true;
+      // Would report a false "reproduced" if this ever ran — proves the mismatch check
+      // is what's actually preventing the sandbox call, not some other reason.
+      return { available: true, reproduced: true, output: "" };
+    };
+    const outcome = await verifyFinding(router, candidate({ needsExecution: true }), FILES, runSandbox);
+    expect(called).toBe(false);
+    expect(outcome.method).toBe("cross_exam");
+    expect(outcome.status).toBe("verified"); // still verified via cross-exam fallback, just not falsely via execution
+  });
+
+  it("still attempts the sandbox when the model omits the optional language field entirely", async () => {
+    const router = createFakeRouter({
+      "verify.cross_exam": { verdict: "refuted", reasoning: "Looks fine to me." },
+      "verify.repro_gen": { canGenerate: true, testCode: "process.exit(1)" }, // no `language` field
+    });
+    const runSandbox = async () => ({ available: true, reproduced: true, output: "AssertionError" });
+    const outcome = await verifyFinding(router, candidate({ needsExecution: true }), FILES, runSandbox);
+    expect(outcome.status).toBe("verified");
+    expect(outcome.method).toBe("execution");
+  });
+
   it("never attempts the sandbox when needsExecution is false", async () => {
     const router = createFakeRouter({ "verify.cross_exam": { verdict: "upheld", reasoning: "Confirmed." } });
     let called = false;

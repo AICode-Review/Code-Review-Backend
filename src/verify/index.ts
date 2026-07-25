@@ -90,10 +90,21 @@ export async function verifyFinding(
     sandboxLang ? generateRepro(router, candidate, fileContent) : Promise.resolve(null),
   ]);
 
+  // repro_gen.v1.md tells the model to report `language` matching the file's actual
+  // language, but nothing enforced that until now — if the model's self-reported
+  // language explicitly disagreed with sandboxLang (derived from the file's own
+  // extension), the mismatched testCode would still run through sandboxLang's
+  // interpreter. A crash from running code in the WRONG runtime (e.g. JS fed to
+  // python3) exits non-zero same as a genuine repro, which runInSandbox reports as
+  // reproduced:true — the strongest, auto-trusted verification outcome in the whole
+  // pipeline. Only skip on an EXPLICIT mismatch, not a merely-omitted (optional)
+  // language field, since that's much weaker evidence something is actually wrong.
+  const languageMismatch = repro?.data?.language !== undefined && repro.data.language !== sandboxLang;
+
   let sandboxAttempted = false;
   let sandboxReproduced = false;
   let sandboxOutput = "";
-  if (sandboxLang && repro?.data?.canGenerate && repro.data.testCode) {
+  if (sandboxLang && repro?.data?.canGenerate && repro.data.testCode && !languageMismatch) {
     const sandbox = await runSandbox(sandboxLang, repro.data.testCode);
     if (sandbox.available) {
       sandboxAttempted = true;
