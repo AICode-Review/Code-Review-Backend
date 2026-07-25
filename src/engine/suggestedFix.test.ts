@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateSuggestedFix } from "./suggestedFix.js";
+import { validateSuggestedFix, validateSuggestedFixSyntax } from "./suggestedFix.js";
 
 describe("validateSuggestedFix", () => {
   it("accepts a concrete, different replacement", () => {
@@ -44,6 +44,33 @@ describe("validateSuggestedFix", () => {
     const original = "if (x) {\n  doThing();\n}";
     const fix = "if (x) {\n  doThing();\n  logAudit(x);\n}";
     const result = validateSuggestedFix(fix, original);
+    expect(result.valid).toBe(true);
+  });
+});
+
+describe("validateSuggestedFixSyntax", () => {
+  it("accepts a syntactically valid replacement", async () => {
+    const source = "function greet(name) {\n  return `hi ${name}`;\n}\n";
+    const result = await validateSuggestedFixSyntax("src/greet.ts", source, 2, 2, "  return `hello ${name}`;");
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects a replacement that introduces a syntax error when spliced in", async () => {
+    const source = "function greet(name) {\n  return `hi ${name}`;\n}\n";
+    // Missing closing brace — the file no longer parses cleanly once spliced in.
+    const result = await validateSuggestedFixSyntax("src/greet.ts", source, 1, 3, "function greet(name) {\n  return `hello ${name}`;");
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/syntax error/i);
+  });
+
+  it("skips the check (valid:true) for a file extension with no tree-sitter grammar", async () => {
+    const result = await validateSuggestedFixSyntax("src/config.xyz", "whatever content", 1, 1, "still whatever");
+    expect(result.valid).toBe(true);
+  });
+
+  it("skips the check when the original file already fails to parse cleanly", async () => {
+    const brokenSource = "function greet(name) {\n  return `hi ${name}`;\n"; // already missing a closing brace
+    const result = await validateSuggestedFixSyntax("src/greet.ts", brokenSource, 2, 2, "  return `hello ${name}`;");
     expect(result.valid).toBe(true);
   });
 });

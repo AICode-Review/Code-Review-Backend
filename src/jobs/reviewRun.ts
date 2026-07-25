@@ -27,7 +27,7 @@ import { runAllPasses } from "../engine/passRunner.js";
 import { mergeAndScore, suppressPreviouslyDismissed, type PassCandidates, type RulebookBoost } from "../engine/merge.js";
 import { matchesIgnoredPath } from "../engine/ignorePaths.js";
 import { extractCodeSnippet } from "../engine/snippet.js";
-import { validateSuggestedFix } from "../engine/suggestedFix.js";
+import { validateSuggestedFix, validateSuggestedFixSyntax } from "../engine/suggestedFix.js";
 import { verifyFinding } from "../verify/index.js";
 import {
   buildLineCommentBody,
@@ -271,6 +271,15 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
         if (!check.valid) {
           console.warn(`[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — ${check.reason}`);
           suggestedFix = undefined;
+        } else if (sourceContent) {
+          // Stronger than the format check above: actually re-parse the file with the
+          // fix spliced in, catching a syntactically broken suggestion (unbalanced
+          // brace, stray comma) the format check alone can't see.
+          const syntaxCheck = await validateSuggestedFixSyntax(m.path, sourceContent, m.startLine, m.endLine, suggestedFix);
+          if (!syntaxCheck.valid) {
+            console.warn(`[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — ${syntaxCheck.reason}`);
+            suggestedFix = undefined;
+          }
         }
       }
 
