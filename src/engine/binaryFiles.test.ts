@@ -56,4 +56,14 @@ describe("isReviewableSourcePath", () => {
     expect(isReviewableSourcePath("src/buildTools.ts")).toBe(true);
     expect(isReviewableSourcePath("src/vendorUtils.ts")).toBe(true);
   });
+
+  it("reviews an extensionless file whose own name exactly matches a skip-dir name, since it's the file itself, not that directory", () => {
+    expect(isReviewableSourcePath("scripts/build")).toBe(true);
+    expect(isReviewableSourcePath("src/vendor")).toBe(true);
+  });
+
+  it("still rejects that same name one level up when it's genuinely the directory", () => {
+    expect(isReviewableSourcePath("scripts/build/output.js")).toBe(false);
+    expect(isReviewableSourcePath("src/vendor/lib.js")).toBe(false);
+  });
 });

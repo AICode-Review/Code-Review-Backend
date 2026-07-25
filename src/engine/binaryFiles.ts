@@ -65,7 +65,11 @@ export function isReviewableSourcePath(path: string): boolean {
   const segments = path.split("/");
   const basename = (segments[segments.length - 1] ?? path).toLowerCase();
   if (SKIP_BASENAMES.has(basename)) return false;
-  if (segments.some((seg) => SKIP_DIR_NAMES.has(seg.toLowerCase()))) return false;
+  // Only the DIRECTORY portion of the path (everything before the basename) should be
+  // checked against SKIP_DIR_NAMES — otherwise a real source file whose own name
+  // happens to exactly match one of these (e.g. an extensionless file literally named
+  // "vendor" or "build") gets wrongly treated as if it were that directory.
+  if (segments.slice(0, -1).some((seg) => SKIP_DIR_NAMES.has(seg.toLowerCase()))) return false;
   const ext = basename.includes(".") ? (basename.split(".").pop() ?? "") : "";
   return !SKIP_EXTENSIONS.has(ext);
 }
