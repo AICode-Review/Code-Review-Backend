@@ -9,12 +9,34 @@ vi.mock("./embeddings.js", () => ({
 
 const { getContext } = await import("./context.js");
 
+/**
+ * Realistic enough to actually filter, unlike a mock that echoes back every row
+ * regardless of the query — that previously masked a real bug where the "callers"
+ * heuristic could never fire in production (see the "actually finds a caller with a
+ * different name" test below).
+ */
 function fakeDb(symbolRows: Record<string, unknown>[]): SupabaseClient {
   return {
     from: () => ({
       select: () => ({
         eq: () => ({
-          in: async () => ({ data: symbolRows, error: null }),
+          in: async (_col: string, names: string[]) => ({
+            data: symbolRows.filter((r) => names.includes(r["name"] as string)),
+            error: null,
+          }),
+          or: (filter: string) => ({
+            limit: async () => {
+              const needles = filter
+                .split(",")
+                .map((seg) => /%(.*)%/.exec(seg)?.[1]?.toLowerCase())
+                .filter((n): n is string => Boolean(n));
+              const data = symbolRows.filter((r) => {
+                const sig = ((r["signature"] as string | null) ?? "").toLowerCase();
+                return needles.some((n) => sig.includes(n));
+              });
+              return { data, error: null };
+            },
+          }),
         }),
       }),
     }),
@@ -28,17 +50,24 @@ describe("getContext", () => {
     expect(result).toEqual({ definitions: [], callers: [], relatedTests: [], similarChunks: [] });
   });
 
-  it("splits matched symbol rows into definitions, callers (signature mentions a changed name), and related tests (path heuristic)", async () => {
+  it("finds a caller with a DIFFERENT name whose one-line signature references the changed symbol", async () => {
     const rows = [
       { path: "src/auth.ts", name: "authenticate", kind: "function", signature: "function authenticate(token)", start_line: 10, end_line: 20 },
-      { path: "src/handler.ts", name: "handleLogin", kind: "function", signature: "calls authenticate(req.token)", start_line: 5, end_line: 15 },
-      { path: "src/auth.test.ts", name: "authenticate test", kind: "function", signature: null, start_line: 1, end_line: 8 },
+      { path: "src/handler.ts", name: "handleLogin", kind: "function", signature: "const handleLogin = (req) => authenticate(req.token)", start_line: 5, end_line: 15 },
+      { path: "src/unrelated.ts", name: "sendEmail", kind: "function", signature: "function sendEmail(to)", start_line: 1, end_line: 3 },
+      { path: "src/auth.test.ts", name: "authenticate", kind: "function", signature: null, start_line: 1, end_line: 8 },
     ];
     const result = await getContext(fakeDb(rows), "repo-1", ["authenticate"]);
-    expect(result.definitions.map((d) => d.name)).toContain("authenticate");
-    expect(result.callers.map((c) => c.name)).toContain("handleLogin");
+    expect(result.definitions.map((d) => d.name)).toEqual(["authenticate"]);
+    expect(result.callers.map((c) => c.name)).toEqual(["handleLogin"]);
     expect(result.relatedTests).toHaveLength(1);
     expect(result.relatedTests[0]?.path).toBe("src/auth.test.ts");
+  });
+
+  it("does not surface a changed symbol's own definition as its own caller", async () => {
+    const rows = [{ path: "src/auth.ts", name: "authenticate", kind: "function", signature: "function authenticate(token)", start_line: 10, end_line: 20 }];
+    const result = await getContext(fakeDb(rows), "repo-1", ["authenticate"]);
+    expect(result.callers).toEqual([]);
   });
 
   it("keeps definitions/callers/relatedTests even when the embedding/similarity lookup fails", async () => {

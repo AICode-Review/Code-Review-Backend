@@ -54,6 +54,10 @@ export async function getContext(
     return { definitions: [], callers: [], relatedTests: [], similarChunks: [] };
   }
 
+  // `symbols.ilike` names only identifier-safe characters can reach — protects the raw
+  // `.or()` filter-string DSL below from a symbol name containing a comma/period/`%` etc.
+  const safeNames = changedSymbolNames.filter((n) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n));
+
   const { data: symbolRows } = await db
     .from("symbols")
     .select("path, name, kind, signature, start_line, end_line")
@@ -63,12 +67,41 @@ export async function getContext(
   const rows = (symbolRows ?? []) as Record<string, unknown>[];
   const definitions = rows.filter((r) => !/test/i.test(r["path"] as string)).map(toSymbolContext);
   const relatedTests = rows.filter((r) => /test/i.test(r["path"] as string)).map(toSymbolContext);
-  // Best-effort "callers": any symbol row whose signature text mentions one of the changed names
-  // (a real call-graph needs the import-graph edges in symbols.meta, not yet populated by v1).
-  const callers = rows.filter((r) => {
-    const sig = (r["signature"] as string | null) ?? "";
-    return changedSymbolNames.some((name) => sig.includes(name) && r["name"] !== name);
-  }).map(toSymbolContext);
+
+  // Best-effort "callers": symbols ANYWHERE in the repo (not just ones sharing a
+  // changed name) whose one-line declaration signature references a changed name —
+  // e.g. a `class Handler extends BaseHandler`/`implements Foo` clause, or a
+  // single-line arrow function whose expression body is a call
+  // (`const validate = (x) => checkInput(x)`). indexer/symbols.ts only stores each
+  // declaration's FIRST LINE, not its full body, so this can never see a call
+  // buried inside a multi-line function — a real call graph needs the import-graph
+  // edges in symbols.meta, not yet populated by v1. This MUST be its own query, not
+  // a further filter over the name-matched rows above: a genuine caller almost
+  // always has a *different* name than the symbol it calls, so pre-filtering to
+  // `.in("name", changedSymbolNames)` would exclude it before this check ever runs.
+  // A separate try/catch (rather than folding into the query above) so a failure
+  // here — e.g. this being run against a client that doesn't support `.or()` — only
+  // costs the callers portion, matching how an embedding/RPC failure below only
+  // costs similarChunks, never definitions/relatedTests.
+  let callers: SymbolContext[] = [];
+  if (safeNames.length > 0) {
+    try {
+      const { data: callerRows } = await db
+        .from("symbols")
+        .select("path, name, kind, signature, start_line, end_line")
+        .eq("repo_id", repoId)
+        .or(safeNames.map((n) => `signature.ilike.%${n}%`).join(","))
+        .limit(50);
+      // A row whose own name is one of the changed names is already surfaced via
+      // `definitions` above — exclude it here so the same declaration doesn't also
+      // show up as its own "caller".
+      callers = ((callerRows ?? []) as Record<string, unknown>[])
+        .filter((r) => !safeNames.includes(r["name"] as string))
+        .map(toSymbolContext);
+    } catch {
+      // Leave callers empty — definitions/relatedTests are still valid.
+    }
+  }
 
   // Symbol-based results above come from a separate, already-succeeded query — an
   // embedding/RPC failure here (e.g. no OpenAI key, transient API error) should only
