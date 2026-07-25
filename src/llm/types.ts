@@ -7,6 +7,7 @@ export type TaskKind =
   | "pass.concurrency"
   | "pass.errors"
   | "pass.tests"
+  | "pass.performance"
   | "pass.style"
   | "verify.cross_exam"
   | "verify.repro_gen"

@@ -43,6 +43,7 @@ function modelFor(task: TaskKind): ModelChoice {
     case "pass.concurrency":
     case "pass.errors":
     case "pass.tests":
+    case "pass.performance":
     case "pass.style":
     case "rulebook.compile":
     case "chat.reply":

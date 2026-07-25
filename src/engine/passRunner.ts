@@ -8,7 +8,7 @@ import { prDiffToPromptText, type ReviewContext } from "./contextAssembly.js";
 const promptsDir = join(dirname(fileURLToPath(import.meta.url)), "prompts");
 
 export const REQUIRED_PASSES = ["logic", "security", "contracts"] as const;
-export const OPTIONAL_PASSES = ["concurrency", "errors", "tests"] as const;
+export const OPTIONAL_PASSES = ["concurrency", "errors", "tests", "performance"] as const;
 export type PassName = (typeof REQUIRED_PASSES)[number] | (typeof OPTIONAL_PASSES)[number] | "style";
 
 const PASS_TASK: Record<PassName, TaskKind> = {
@@ -18,6 +18,7 @@ const PASS_TASK: Record<PassName, TaskKind> = {
   concurrency: "pass.concurrency",
   errors: "pass.errors",
   tests: "pass.tests",
+  performance: "pass.performance",
   style: "pass.style",
 };
 

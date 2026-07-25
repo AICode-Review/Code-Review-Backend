@@ -77,7 +77,7 @@ describe("runAllPasses", () => {
     });
     const passNames = results.map((r) => r.pass).sort();
     expect(passNames).toEqual(["contracts", "logic", "security"]);
-    expect(skippedPasses).toEqual(["concurrency", "errors", "tests"]);
+    expect(skippedPasses).toEqual(["concurrency", "errors", "tests", "performance"]);
   });
 
   it("runs optional passes while under the cost cap, skips the rest once exceeded", async () => {
@@ -94,7 +94,7 @@ describe("runAllPasses", () => {
       costCapUsd: 0.0035,
     });
     expect(results.map((r) => r.pass)).toContain("concurrency");
-    expect(skippedPasses).toEqual(["errors", "tests"]);
+    expect(skippedPasses).toEqual(["errors", "tests", "performance"]);
     expect(totalCostUsd).toBeCloseTo(0.004, 5);
   });
 
@@ -106,6 +106,7 @@ describe("runAllPasses", () => {
       "pass.concurrency": { candidates: [] },
       "pass.errors": { candidates: [] },
       "pass.tests": { candidates: [] },
+      "pass.performance": { candidates: [] },
       "pass.style": { candidates: [] },
     });
     const withoutRulebook = await runAllPasses(router, makeContext(), { rulebook: [], costCapUsd: 10 });
