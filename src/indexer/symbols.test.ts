@@ -88,6 +88,29 @@ describe("extractSymbols", () => {
     expect(symbols.map((s) => s.name)).toEqual(expect.arrayContaining(["foo", "Bar"]));
   });
 
+  it("regex fallback finds the real end of a multi-line brace block, not just the declaration line", async () => {
+    const code = `function foo(x) {\n  var y = x + 1;\n  return y;\n}\n`;
+    const symbols = await extractSymbols("main.someunknownlang", code);
+    const foo = symbols.find((s) => s.name === "foo");
+    expect(foo?.startLine).toBe(1);
+    expect(foo?.endLine).toBe(4); // previously always 1 — a body-only edit was invisible to overlap detection
+  });
+
+  it("regex fallback ignores braces inside string literals when finding the block end", async () => {
+    const code = `function foo() {\n  print("looks like a close } but is not");\n  var x = 1;\n}\n`;
+    const symbols = await extractSymbols("main.someunknownlang", code);
+    const foo = symbols.find((s) => s.name === "foo");
+    expect(foo?.endLine).toBe(4);
+  });
+
+  it("regex fallback keeps the original single-line behavior when no brace body is found nearby (e.g. a body-less forward declaration)", async () => {
+    const code = `function foo();\nconst a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\n`;
+    const symbols = await extractSymbols("main.someunknownlang", code);
+    const foo = symbols.find((s) => s.name === "foo");
+    expect(foo?.startLine).toBe(1);
+    expect(foo?.endLine).toBe(1); // no `{` within the lookahead — falls back to the original behavior
+  });
+
   it("never throws on unparseable content", async () => {
     await expect(extractSymbols("src/foo.ts", "{{{ not valid typescript at all ((( ")).resolves.toBeDefined();
   });

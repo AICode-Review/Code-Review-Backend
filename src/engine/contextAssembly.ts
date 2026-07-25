@@ -65,8 +65,13 @@ export async function assembleContext(
         content: truncated ? `${content.slice(0, MAX_FILE_CHARS)}\n… (truncated)` : content,
         truncated,
       });
-    } catch {
-      // Binary file, or renamed/removed between diff fetch and file fetch — skip it.
+    } catch (err) {
+      // Binary file, renamed/removed between diff fetch and file fetch, or a
+      // transient platform API error — never fail the review over one file, but do
+      // log it: unlike a rename/deletion race (expected, harmless), a transient
+      // fetch failure silently shrinks what the passes see with no other trace,
+      // and this file definitely exists per the diff we already have.
+      console.warn(`[contextAssembly] failed to fetch ${path} for review — skipping it:`, err);
     }
   }
 

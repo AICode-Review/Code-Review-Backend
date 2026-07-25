@@ -15,6 +15,59 @@ const REGEX_FALLBACK_PATTERNS: { kind: string; re: RegExp }[] = [
   { kind: "class", re: /^\s*(?:public\s+|export\s+)*(?:class|struct|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/ },
 ];
 
+/**
+ * For the regex fallback only (tree-sitter already gives the real AST span): naive
+ * brace-counting to find where a C-style block actually ends, starting from the
+ * declaration line. Without this, `endLine` was always pinned to the single
+ * declaration line — meaning an edit anywhere inside a function's BODY (as opposed
+ * to its own declaration line) was invisible to `changedSymbols.ts`'s overlap
+ * detection for every language without a tree-sitter grammar here, silently
+ * weakening cross-file context for the majority of languages on real edits. Tracks
+ * string literals (and their escapes) so a brace inside a quoted value doesn't
+ * throw off the depth count. Always safe to call: falls back to `declLineIndex`
+ * unchanged (the original, narrower behavior) whenever no brace block is found —
+ * a non-brace language (Python, Ruby's `def...end`), an interface/abstract method
+ * with no body, or genuinely unterminated code all degrade to exactly today's
+ * behavior rather than something worse.
+ */
+function findBraceBlockEnd(lines: string[], declLineIndex: number): number {
+  const OPEN_BRACE_LOOKAHEAD = 5;
+  let openLineIndex = -1;
+  for (let i = declLineIndex; i < Math.min(lines.length, declLineIndex + OPEN_BRACE_LOOKAHEAD); i++) {
+    if ((lines[i] ?? "").includes("{")) {
+      openLineIndex = i;
+      break;
+    }
+  }
+  if (openLineIndex === -1) return declLineIndex;
+
+  let depth = 0;
+  let inString = false;
+  let stringChar = "";
+  let escaped = false;
+  for (let i = openLineIndex; i < lines.length; i++) {
+    for (const ch of lines[i] ?? "") {
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === stringChar) inString = false;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        inString = true;
+        stringChar = ch;
+        continue;
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) return i;
+      }
+    }
+  }
+  return declLineIndex;
+}
+
 function extractByRegex(content: string): ExtractedSymbol[] {
   const lines = content.split("\n");
   const symbols: ExtractedSymbol[] = [];
@@ -22,7 +75,13 @@ function extractByRegex(content: string): ExtractedSymbol[] {
     for (const { kind, re } of REGEX_FALLBACK_PATTERNS) {
       const match = re.exec(line);
       if (match?.[1]) {
-        symbols.push({ kind, name: match[1], signature: line.trim().slice(0, 200), startLine: i + 1, endLine: i + 1 });
+        symbols.push({
+          kind,
+          name: match[1],
+          signature: line.trim().slice(0, 200),
+          startLine: i + 1,
+          endLine: findBraceBlockEnd(lines, i) + 1,
+        });
         break;
       }
     }
