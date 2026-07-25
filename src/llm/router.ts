@@ -81,10 +81,81 @@ async function withRetry(fn: () => Promise<ProviderResult>, attempts = 3): Promi
   throw lastErr;
 }
 
+/** JSON.parse never legitimately returns `undefined`, so it's a safe "this candidate didn't parse" sentinel. */
+function tryJsonParse(candidate: string): unknown {
+  try {
+    return JSON.parse(candidate.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Scans for the first balanced top-level `{...}`/`[...]` substring, tracking string
+ * literals (and their escapes) so a brace/bracket inside a quoted value never throws
+ * off the depth count. Used as a last resort when a model wraps valid JSON in prose
+ * without markdown fences at all.
+ */
+function extractBalancedJson(text: string): string | null {
+  const start = text.search(/[{[]/);
+  if (start === -1) return null;
+  const open = text.charAt(start);
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * Every structured LLM call (all specialist passes, cross-exam, rulebook compile,
+ * chat reply, repro gen) funnels through this. Models are told "ONLY JSON, no
+ * prose, no fences" but don't always comply — a skeptic model reasoning about code
+ * may quote a snippet in its own fence before the real JSON, or add a trailing
+ * explanation after it. The original version only ever looked at the FIRST fenced
+ * block (wrong one, if the model fenced example code before its answer) and
+ * otherwise JSON.parsed the entire raw text (fails on any stray leading/trailing
+ * prose). A wrongly-dropped response here fails closed — a real finding lost, not
+ * just a formatting nuisance — so this tries progressively looser strategies
+ * before giving up: prefer a ```json-tagged fence, then any fenced block, then the
+ * whole trimmed text (the fast path for the common well-formed case), then a
+ * balanced brace/bracket scan through surrounding prose.
+ */
 function extractJson(text: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  const candidate = fenced?.[1] ?? text;
-  return JSON.parse(candidate.trim());
+  for (const m of text.matchAll(/```json\s*([\s\S]*?)```/gi)) {
+    const parsed = tryJsonParse(m[1] ?? "");
+    if (parsed !== undefined) return parsed;
+  }
+  for (const m of text.matchAll(/```[a-zA-Z0-9_-]*\s*([\s\S]*?)```/g)) {
+    const parsed = tryJsonParse(m[1] ?? "");
+    if (parsed !== undefined) return parsed;
+  }
+  const whole = tryJsonParse(text);
+  if (whole !== undefined) return whole;
+  const balanced = extractBalancedJson(text);
+  if (balanced !== null) {
+    const parsed = tryJsonParse(balanced);
+    if (parsed !== undefined) return parsed;
+  }
+  throw new SyntaxError("No parseable JSON found in model response");
 }
 
 function tryParse<T>(schema: z.ZodType<T>, text: string): { ok: true; data: T } | { ok: false; error: string } {

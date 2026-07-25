@@ -94,3 +94,62 @@ describe("createLlmRouter provider fallback", () => {
     expect(crossExam.provider).toBe("openai");
   });
 });
+
+describe("createLlmRouter JSON extraction robustness", () => {
+  beforeEach(() => {
+    process.env["ANTHROPIC_API_KEY"] = "sk-ant";
+  });
+
+  it("parses a plain unfenced JSON response (the common fast path)", async () => {
+    callAnthropicMock.mockResolvedValueOnce({ text: '{"ok":true}', inputTokens: 10, outputTokens: 5 });
+    const router = await freshRouter();
+    const result = await router.complete({ task: "pass.security", messages: [], schema: SCHEMA, maxTokens: 100 });
+    expect(result.data).toEqual({ ok: true });
+  });
+
+  it("parses a single ```json-fenced response", async () => {
+    callAnthropicMock.mockResolvedValueOnce({ text: '```json\n{"ok":true}\n```', inputTokens: 10, outputTokens: 5 });
+    const router = await freshRouter();
+    const result = await router.complete({ task: "pass.security", messages: [], schema: SCHEMA, maxTokens: 100 });
+    expect(result.data).toEqual({ ok: true });
+  });
+
+  it("finds the real JSON when an earlier fenced code snippet precedes it (previously grabbed the wrong fence)", async () => {
+    const text = 'Let me check the code:\n```js\nconst x = 1;\n```\nVerdict:\n```json\n{"ok":true}\n```';
+    callAnthropicMock.mockResolvedValueOnce({ text, inputTokens: 10, outputTokens: 5 });
+    const router = await freshRouter();
+    const result = await router.complete({ task: "pass.security", messages: [], schema: SCHEMA, maxTokens: 100 });
+    expect(result.data).toEqual({ ok: true });
+  });
+
+  it("extracts JSON from surrounding prose with no fences at all", async () => {
+    callAnthropicMock.mockResolvedValueOnce({
+      text: 'Here is my answer: {"ok":true} — let me know if you need anything else.',
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    const router = await freshRouter();
+    const result = await router.complete({ task: "pass.security", messages: [], schema: SCHEMA, maxTokens: 100 });
+    expect(result.data).toEqual({ ok: true });
+  });
+
+  it("ignores braces inside string values when balance-scanning unfenced JSON", async () => {
+    const schema = z.object({ reasoning: z.string() });
+    callAnthropicMock.mockResolvedValueOnce({
+      text: 'Answer: {"reasoning": "the object looks like { not real } here"} done.',
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    const router = await freshRouter();
+    const result = await router.complete({ task: "pass.security", messages: [], schema, maxTokens: 100 });
+    expect(result.data).toEqual({ reasoning: "the object looks like { not real } here" });
+  });
+
+  it("still drops the response (after the repair retry) when there's genuinely no JSON to find", async () => {
+    callAnthropicMock.mockResolvedValue({ text: "I cannot answer that.", inputTokens: 10, outputTokens: 5 });
+    const router = await freshRouter();
+    const result = await router.complete({ task: "pass.security", messages: [], schema: SCHEMA, maxTokens: 100 });
+    expect(result.data).toBeNull();
+    expect(callAnthropicMock).toHaveBeenCalledTimes(2); // first attempt + one repair retry
+  });
+});
