@@ -68,10 +68,20 @@ export function mergeAndScore(candidatesByPass: PassCandidates[], rulebookBoost:
       const existing = merged[dupIndex]!;
       const mergedEvidence = [...new Set([...existing.evidence, ...candidate.evidence])];
       const mergedPasses = [...existing.passes, pass];
-      merged[dupIndex] =
-        candidate.confidence > existing.confidence
-          ? { ...candidate, fingerprint: computeFingerprint(candidate), score: 0, passes: mergedPasses, evidence: mergedEvidence }
-          : { ...existing, passes: mergedPasses, evidence: mergedEvidence };
+      const winner = candidate.confidence > existing.confidence ? candidate : existing;
+      // Fingerprint must be recomputed from the FULL merged evidence set, not just
+      // whichever candidate's own evidence happened to win the confidence tiebreak —
+      // otherwise the same logical finding gets a different fingerprint across runs
+      // purely because ordinary LLM confidence non-determinism flipped which pass's
+      // candidate "won" that particular run, silently breaking dismiss/ignore
+      // carry-forward for exactly the multi-pass findings that matter most.
+      merged[dupIndex] = {
+        ...winner,
+        score: 0,
+        passes: mergedPasses,
+        evidence: mergedEvidence,
+        fingerprint: computeFingerprint({ ...winner, evidence: mergedEvidence }),
+      };
     }
   }
 

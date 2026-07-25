@@ -88,6 +88,28 @@ describe("mergeAndScore", () => {
     expect(mergeAndScore(byPass)).toHaveLength(1);
   });
 
+  it("fingerprint reflects the full merged evidence set, not just whichever candidate happened to win the confidence tiebreak", () => {
+    // Same two pieces of evidence contribute to the same logical finding across two
+    // "runs" — but which pass's candidate has the higher confidence flips (ordinary
+    // LLM non-determinism run-to-run). The resulting fingerprint must be identical
+    // either way, or a real dismissal/ignore recorded against one run's fingerprint
+    // silently fails to suppress the same finding on the next run.
+    const runA: PassCandidates[] = [
+      { pass: "logic", candidates: [candidate({ confidence: 0.6, evidence: ["evidence one"] })] },
+      { pass: "contracts", candidates: [candidate({ confidence: 0.8, evidence: ["evidence two"] })] },
+    ];
+    const runB: PassCandidates[] = [
+      { pass: "logic", candidates: [candidate({ confidence: 0.8, evidence: ["evidence one"] })] },
+      { pass: "contracts", candidates: [candidate({ confidence: 0.6, evidence: ["evidence two"] })] },
+    ];
+    const resultA = mergeAndScore(runA);
+    const resultB = mergeAndScore(runB);
+    expect(resultA).toHaveLength(1);
+    expect(resultB).toHaveLength(1);
+    expect(resultA[0]?.evidence).toEqual(expect.arrayContaining(["evidence one", "evidence two"]));
+    expect(resultA[0]?.fingerprint).toBe(resultB[0]?.fingerprint);
+  });
+
   it("a below-floor candidate never suppresses a real one it would have deduped with", () => {
     const weak = candidate({ confidence: MIN_CANDIDATE_CONFIDENCE - 0.05, evidence: ["weak"] });
     const real = candidate({ confidence: 0.8, evidence: ["strong signal"] });
