@@ -48,7 +48,7 @@ export function sandboxLanguageFor(path: string): SandboxLanguage | null {
 }
 
 export interface SandboxResult {
-  /** false = Docker itself wasn't usable (not installed, daemon down, image unavailable) — no verification signal either way, never treat as "not reproduced". */
+  /** false = no reliable verification signal either way — Docker itself wasn't usable (not installed, daemon down, image unavailable), OR the run timed out (inconclusive, not evidence of a pass). Never treat as "not reproduced". */
   available: boolean;
   /** Only meaningful when available === true: the generated test failed (non-zero exit), i.e. the defect reproduced. */
   reproduced: boolean;
@@ -105,7 +105,13 @@ export async function runInSandbox(language: SandboxLanguage, testCode: string):
       const output = `${err.stdout ?? ""}${err.stderr ?? ""}`.slice(0, OUTPUT_CAP);
 
       if (err.code === "ENOENT") return { available: false, reproduced: false, output: "docker is not installed on this host" };
-      if (err.killed) return { available: true, reproduced: false, output: `sandbox timed out after ${TIMEOUT_MS}ms\n${output}` };
+      // A timeout is NOT the same signal as a clean exit-0 pass — it proves nothing
+      // either way, and could even be evidence FOR the defect (an infinite loop/hang
+      // caused by the very bug under test). Treat it as no reliable signal at all
+      // (available: false) so the caller falls back to cross-exam-only, the same as
+      // when Docker itself is unusable, rather than confidently asserting "did not
+      // reproduce" on a result that's actually inconclusive.
+      if (err.killed) return { available: false, reproduced: false, output: `sandbox timed out after ${TIMEOUT_MS}ms\n${output}` };
       // Docker documents these as "the docker/container command itself failed to run" rather than the
       // test's own exit status — e.g. 125 = docker CLI error (daemon unreachable, bad flags), 126/127 =
       // the command inside the container couldn't be invoked/found at all. Any other code is the test's
