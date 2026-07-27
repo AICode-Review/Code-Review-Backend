@@ -78,14 +78,29 @@ export async function handleRulebookCompile(job: RulebookCompileJob): Promise<vo
         .eq("rule_text", proposal.ruleText)
         .maybeSingle();
 
+      // Evidence count reflects how many SEPARATE compile runs have independently
+      // re-derived this exact rule (org/repo/category/rule_text) — NOT the size of
+      // the event cluster it happened to come from this run. RulebookCompileOutputSchema
+      // has no per-proposal event attribution (the LLM returns a flat list of
+      // {ruleText, category} proposals with no link back to which of the cluster's
+      // events supports which one), so incrementing by clusterEvents.length previously
+      // added the FULL category cluster size (up to 50) to every proposed rule from
+      // that run — meaning a brand-new rule proposed from a cluster of just 2+
+      // unrelated dismissals would immediately satisfy MIN_EVIDENCE_TO_AUTO_ACTIVATE
+      // on its very first appearance, making the "2+ evidence events" auto-activation
+      // safeguard nearly meaningless. +1 per run this exact rule text gets proposed
+      // again is the safe, conservative reading of "2+ evidence events": it requires
+      // the SAME rule to be independently re-derived across at least two separate
+      // compile runs (i.e. two separate batches of new feedback over time) before
+      // it can silently start suppressing future findings.
       if (existing) {
-        const evidenceCount = (existing.evidence_count as number) + clusterEvents.length;
+        const evidenceCount = (existing.evidence_count as number) + 1;
         await db
           .from("rulebook_rules")
           .update({ evidence_count: evidenceCount, active: evidenceCount >= MIN_EVIDENCE_TO_AUTO_ACTIVATE })
           .eq("id", existing.id);
       } else {
-        const evidenceCount = clusterEvents.length;
+        const evidenceCount = 1;
         await db.from("rulebook_rules").insert({
           org_id: job.orgId,
           repo_id: job.repoId,
