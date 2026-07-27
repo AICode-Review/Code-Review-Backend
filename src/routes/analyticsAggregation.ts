@@ -38,7 +38,7 @@ function median(nums: number[]): number {
  */
 export function buildWeeklyAnalytics(
   runs: { startedAt: string; posted: number; latencyMs: number | null }[],
-  findings: { createdAt: string; feedback: string | null }[],
+  findings: { createdAt: string; feedback: string | null; posted: boolean }[],
   weeksBack: number,
   now: Date = new Date(),
 ): WeekPoint[] {
@@ -63,6 +63,13 @@ export function buildWeeklyAnalytics(
     if (run.latencyMs !== null) bucket.latencies.push(run.latencyMs);
   }
   for (const f of findings) {
+    // Only findings actually posted as a line comment count toward acceptance/noise —
+    // a digest (verified but budget-excluded) finding can still collect feedback via
+    // the web app's own RunDetail UI (RunDetail.tsx wires onFeedback for digest items),
+    // but that reaction is to something we merely listed in a collapsed summary, not
+    // something we actively interrupted the PR with. frontend/useRepos.ts's mirrored
+    // formula has always filtered this way — this was the one place the two diverged.
+    if (!f.posted) continue;
     const bucket = buckets.get(keyFor(f.createdAt));
     if (!bucket) continue;
     if (f.feedback === "accepted" || f.feedback === "fixed") bucket.accepted++;

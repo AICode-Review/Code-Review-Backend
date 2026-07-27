@@ -217,13 +217,13 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
 
     const { data: findings } =
       runIds.length > 0
-        ? await db.from("findings").select("category, feedback, created_at").in("run_id", runIds)
-        : { data: [] as { category: string; feedback: string | null; created_at: string }[] };
+        ? await db.from("findings").select("category, feedback, created_at, posted").in("run_id", runIds)
+        : { data: [] as { category: string; feedback: string | null; created_at: string; posted: boolean }[] };
     const findingRows = findings ?? [];
 
     const weekly = buildWeeklyAnalytics(
       runRows.map((r) => ({ startedAt: r.started_at as string, posted: r.posted as number, latencyMs: r.latency_ms as number | null })),
-      findingRows.map((f) => ({ createdAt: f.created_at as string, feedback: f.feedback as string | null })),
+      findingRows.map((f) => ({ createdAt: f.created_at as string, feedback: f.feedback as string | null, posted: f.posted as boolean })),
       weeksBack,
     );
     const categories = categoryCounts(findingRows.map((f) => ({ category: f.category as string })));

@@ -16,9 +16,9 @@ describe("buildWeeklyAnalytics", () => {
       { startedAt: "2026-07-09T10:00:00Z", posted: 2, latencyMs: 180_000 },
     ];
     const findings = [
-      { createdAt: "2026-07-08T10:05:00Z", feedback: "accepted" },
-      { createdAt: "2026-07-08T10:06:00Z", feedback: "dismissed" },
-      { createdAt: "2026-07-09T10:05:00Z", feedback: "fixed" },
+      { createdAt: "2026-07-08T10:05:00Z", feedback: "accepted", posted: true },
+      { createdAt: "2026-07-08T10:06:00Z", feedback: "dismissed", posted: true },
+      { createdAt: "2026-07-09T10:05:00Z", feedback: "fixed", posted: true },
     ];
     const result = buildWeeklyAnalytics(runs, findings, 2, NOW);
     const thisWeek = result[result.length - 1]!;
@@ -28,6 +28,22 @@ describe("buildWeeklyAnalytics", () => {
     expect(thisWeek.acceptancePct).toBe(67); // 2/3 rounded
     expect(thisWeek.noisePct).toBe(20); // 1/5 posted
     expect(thisWeek.medianLatencyMin).toBe(2.5); // median(120s,180s) = 150s = 2.5min
+  });
+
+  it("ignores feedback on a non-posted (digest) finding — must match frontend/useRepos.ts's mirrored formula exactly", () => {
+    const runs = [{ startedAt: "2026-07-08T10:00:00Z", posted: 2, latencyMs: 100_000 }];
+    const findings = [
+      { createdAt: "2026-07-08T10:05:00Z", feedback: "accepted", posted: true },
+      // Given via the web app's RunDetail digest section (RunDetail.tsx wires onFeedback
+      // there) even though this finding was never posted as a line comment — must not
+      // count toward acceptance/noise, the same as the frontend's own dashboard.
+      { createdAt: "2026-07-08T10:06:00Z", feedback: "dismissed", posted: false },
+    ];
+    const result = buildWeeklyAnalytics(runs, findings, 1, NOW);
+    expect(result[0]?.accepted).toBe(1);
+    expect(result[0]?.dismissed).toBe(0);
+    expect(result[0]?.acceptancePct).toBe(100); // 1/1, the non-posted dismissal excluded entirely
+    expect(result[0]?.noisePct).toBe(0);
   });
 
   it("drops data outside the requested window", () => {
