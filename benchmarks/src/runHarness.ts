@@ -1,27 +1,53 @@
 import { seedCases } from "./dataset/seed.js";
 import { scoreCase, summarize } from "./scoring.js";
 import type { BenchmarkCase, ReportedFinding } from "./types.js";
+import { env } from "../../src/config.js";
+import { createLlmRouter } from "../../src/llm/router.js";
+import { buildPrDiff, diffTextForPath } from "../../src/engine/diff.js";
+import type { ReviewContext } from "../../src/engine/contextAssembly.js";
+import { runAllPasses } from "../../src/engine/passRunner.js";
+import { mergeAndScore, type PassCandidates } from "../../src/engine/merge.js";
+import { verifyFinding } from "../../src/verify/index.js";
 
 /**
- * Runs one case through whatever's under test and returns its findings in the harness's
- * narrow ReportedFinding shape. This is the one integration point NOT wired up yet —
- * deliberately: actually running a case means real Anthropic/OpenAI API spend per DESIGN.md
- * §6/§8's real pipeline, and this repo hasn't funded/run a real benchmark pass yet (see
- * README.md). Wire this to either:
- *   (a) a direct import of the backend's engine functions (runAllPasses + verifyFinding
- *       from ../../src/engine, ../../src/verify) against a fake ReviewContext
- *       built from `case.diff`/`case.files`, using the REAL LlmRouter (createLlmRouter()),
- *       or
- *   (b) a lightweight backend endpoint that runs the same engine functions server-side and
- *       returns findings as JSON, if running benchmarks from a machine without direct
- *       filesystem access to backend/ is a requirement later.
- * Route (a) needs no new backend code, just a cross-package import — the natural next step.
+ * Runs one case through the real engine (route (a) from this function's former doc
+ * comment) — a fake ReviewContext built directly from the case's diff/files (no adapter,
+ * no db, no repo index: benchmark cases are self-contained), the real LlmRouter, the same
+ * runAllPasses → mergeAndScore → verifyFinding pipeline jobs/reviewRun.ts uses. Only
+ * VERIFIED findings are reported — this measures the *verified* catch rate DESIGN.md §1
+ * targets (>70%), not raw candidate output before verification.
  */
-async function reviewCase(_benchCase: BenchmarkCase): Promise<ReportedFinding[]> {
-  throw new Error(
-    "reviewCase() is not wired to the live engine yet — see the doc comment above runHarness.ts. " +
-      "Running this for real means spending Anthropic/OpenAI API budget; that's a deliberate choice to make explicitly, not a default.",
+async function reviewCase(benchCase: BenchmarkCase): Promise<ReportedFinding[]> {
+  const router = createLlmRouter();
+
+  const prDiff = buildPrDiff({ baseSha: "base", headSha: "head", diffText: benchCase.diff });
+  const ctx: ReviewContext = {
+    prDiff,
+    files: Object.entries(benchCase.files).map(([path, content]) => ({ path, content, truncated: false })),
+    repoContext: null,
+    repoContextTimedOut: false,
+  };
+
+  const { results } = await runAllPasses(router, ctx, { rulebook: [], costCapUsd: env().RUN_COST_CAP_USD });
+  const candidatesByPass: PassCandidates[] = results.map((r) => ({ pass: r.pass, candidates: r.candidates }));
+  const merged = mergeAndScore(candidatesByPass);
+
+  const filesMap = new Map(Object.entries(benchCase.files));
+  const verified = await Promise.all(
+    merged.map(async (finding) => ({
+      finding,
+      outcome: await verifyFinding(router, finding, filesMap, undefined, diffTextForPath(prDiff, finding.path) ?? undefined),
+    })),
   );
+
+  return verified
+    .filter(({ outcome }) => outcome.status === "verified")
+    .map(({ finding }) => ({
+      path: finding.path,
+      startLine: finding.startLine,
+      endLine: finding.endLine,
+      category: finding.category,
+    }));
 }
 
 async function main(): Promise<void> {

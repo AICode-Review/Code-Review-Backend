@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createFakeRouter } from "../llm/fakeRouter.js";
 import { verifyFinding } from "./index.js";
 import type { Candidate } from "../engine/schemas.js";
+import type { CompleteRequest, CompleteResult, LlmRouter } from "../llm/types.js";
 
 function candidate(overrides: Partial<Candidate> = {}): Candidate {
   return {
@@ -70,6 +71,40 @@ describe("verifyFinding", () => {
     const outcome = await verifyFinding(router, candidate(), FILES);
     expect(outcome.status).toBe("rejected");
     expect(outcome.method).toBe("cross_exam");
+  });
+
+  it("includes the PR diff in the cross-exam prompt when the caller has one, so a before/after claim (e.g. 'escaping was removed') is actually checkable", async () => {
+    const capturedMessages: string[] = [];
+    const router: LlmRouter = {
+      async complete<T>(req: CompleteRequest<T>): Promise<CompleteResult<T>> {
+        capturedMessages.push(...req.messages.map((m) => m.content));
+        const parsed = req.schema.safeParse({ verdict: "upheld", reasoning: "Confirmed via the diff." });
+        return {
+          data: parsed.success ? parsed.data : null,
+          inputTokens: 10,
+          outputTokens: 10,
+          costUsd: 0.001,
+          model: "fake-model",
+          provider: "openai",
+        };
+      },
+    };
+    const diffText = "### DIFF: src/foo.ts (+1/-1)\n-2: const x = 2;\n+2: const x = 1;";
+    await verifyFinding(router, candidate(), FILES, undefined, diffText);
+    expect(capturedMessages.some((m) => m.includes(diffText))).toBe(true);
+  });
+
+  it("omits the diff section from the prompt when the caller has no diff for this path", async () => {
+    const capturedMessages: string[] = [];
+    const router: LlmRouter = {
+      async complete<T>(req: CompleteRequest<T>): Promise<CompleteResult<T>> {
+        capturedMessages.push(...req.messages.map((m) => m.content));
+        const parsed = req.schema.safeParse({ verdict: "upheld", reasoning: "Confirmed." });
+        return { data: parsed.success ? parsed.data : null, inputTokens: 10, outputTokens: 10, costUsd: 0.001, model: "fake-model", provider: "openai" };
+      },
+    };
+    await verifyFinding(router, candidate(), FILES);
+    expect(capturedMessages.some((m) => m.includes("What changed in this PR"))).toBe(false);
   });
 });
 

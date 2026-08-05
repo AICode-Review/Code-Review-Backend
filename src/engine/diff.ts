@@ -121,6 +121,24 @@ export function parseUnifiedDiff(diffText: string): DiffFile[] {
   return files;
 }
 
+/** One file's diff, formatted as `+123: added line` / `-45: removed line` / ` 67: context line` — the block shared by contextAssembly.ts's full-diff prompt text and verify/'s per-finding diff lookup, so both render diffs identically. */
+export function diffFileToPromptText(f: DiffFile): string {
+  const lines = f.lines
+    .map((l) => {
+      const marker = l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ";
+      const lineNo = l.newNo ?? l.oldNo ?? "";
+      return `${marker}${lineNo}: ${l.text}`;
+    })
+    .join("\n");
+  return `### DIFF: ${f.path} (+${f.additions}/-${f.deletions})\n${lines}`;
+}
+
+/** The diff block for a single file, by path — null if that path isn't part of this PrDiff (e.g. context built for one file at a time, or a stale path). */
+export function diffTextForPath(prDiff: PrDiff, path: string): string | null {
+  const file = prDiff.files.find((f) => f.path === path);
+  return file ? diffFileToPromptText(file) : null;
+}
+
 export function buildPrDiff(args: {
   baseSha: string;
   headSha: string;

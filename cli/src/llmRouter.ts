@@ -28,6 +28,7 @@ function modelFor(task: TaskKind, cfg: CliRouterConfig): { provider: "anthropic"
     case "pass.concurrency":
     case "pass.errors":
     case "pass.tests":
+    case "pass.performance":
     case "pass.style":
     case "rulebook.compile":
     case "chat.reply":

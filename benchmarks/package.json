@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "bench": "tsx src/runHarness.ts",
+    "bench": "cd .. && tsx benchmarks/src/runHarness.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

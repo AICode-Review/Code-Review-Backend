@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPrDiff, parseUnifiedDiff } from "./diff.js";
+import { buildPrDiff, diffFileToPromptText, diffTextForPath, parseUnifiedDiff } from "./diff.js";
 
 const SAMPLE_DIFF = `diff --git a/src/auth.ts b/src/auth.ts
 index 1234567..89abcde 100644
@@ -96,5 +96,30 @@ describe("buildPrDiff", () => {
     expect(diff.baseLabel).toBe("main");
     expect(diff.headLabel).toBe("feature");
     expect(diff.files).toEqual([]);
+  });
+});
+
+describe("diffFileToPromptText / diffTextForPath", () => {
+  const prDiff = buildPrDiff({ baseSha: "aaaaaaaaaaaa", headSha: "bbbbbbbbbbbb", diffText: SAMPLE_DIFF });
+
+  it("formats a single file's lines with +/-/space markers and its own line numbers", () => {
+    const auth = prDiff.files.find((f) => f.path === "src/auth.ts")!;
+    const text = diffFileToPromptText(auth);
+    expect(text).toContain("### DIFF: src/auth.ts (+2/-1)");
+    expect(text).toContain("-13:");
+    expect(text).toContain("+13:");
+    expect(text).toContain("const user = lookupUser(token);");
+    expect(text).toContain("const user = lookupUser(token.trim());");
+  });
+
+  it("diffTextForPath returns just that file's block, not the whole PR's diff", () => {
+    const text = diffTextForPath(prDiff, "src/auth.ts");
+    expect(text).toContain("src/auth.ts");
+    expect(text).not.toContain("src/new-file.ts");
+    expect(text).not.toContain("src/removed.ts");
+  });
+
+  it("diffTextForPath returns null for a path not in this PR's diff", () => {
+    expect(diffTextForPath(prDiff, "src/nonexistent.ts")).toBeNull();
   });
 });

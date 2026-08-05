@@ -23,6 +23,7 @@ import { reviewCompleteEmail } from "../email/templates.js";
 import { createLlmRouter } from "../llm/router.js";
 import type { LlmRouter } from "../llm/types.js";
 import { assembleContext } from "../engine/contextAssembly.js";
+import { diffTextForPath } from "../engine/diff.js";
 import { runAllPasses } from "../engine/passRunner.js";
 import { mergeAndScore, suppressPreviouslyDismissed, type PassCandidates, type RulebookBoost } from "../engine/merge.js";
 import { matchesIgnoredPath } from "../engine/ignorePaths.js";
@@ -254,7 +255,7 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
         // Cost cap reached — remaining candidates are dropped from this run entirely (never posted unverified).
         continue;
       }
-      const outcome = await verifyFinding(router, m, filesByPath, sandboxOverride);
+      const outcome = await verifyFinding(router, m, filesByPath, sandboxOverride, diffTextForPath(ctx.prDiff, m.path) ?? undefined);
       verifyCostUsd += outcome.costUsd;
       verifyAnthropicCostUsd += outcome.anthropicCostUsd;
       verifyOpenaiCostUsd += outcome.openaiCostUsd;

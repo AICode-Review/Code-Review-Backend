@@ -67,6 +67,8 @@ export async function verifyFinding(
   candidate: Candidate,
   files: Map<string, string>,
   runSandbox: (language: NonNullable<ReturnType<typeof sandboxLanguageFor>>, testCode: string) => Promise<SandboxResult> = runInSandbox,
+  /** This PR's diff text for candidate.path, when the caller has it — see crossExamine.ts's doc comment for why this matters. */
+  diffText?: string,
 ): Promise<VerifyOutcome> {
   const staticResult = staticExistenceCheck(candidate, files);
   if (!staticResult.passed) {
@@ -86,7 +88,7 @@ export async function verifyFinding(
   const sandboxLang = candidate.needsExecution ? sandboxLanguageFor(candidate.path) : null;
 
   const [crossExam, repro] = await Promise.all([
-    crossExamine(router, candidate, fileContent),
+    crossExamine(router, candidate, fileContent, diffText),
     sandboxLang ? generateRepro(router, candidate, fileContent) : Promise.resolve(null),
   ]);
 

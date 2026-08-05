@@ -1,5 +1,6 @@
 import { runAllPasses } from "../../src/engine/passRunner.js";
 import { mergeAndScore, type PassCandidates } from "../../src/engine/merge.js";
+import { diffTextForPath } from "../../src/engine/diff.js";
 import { verifyFinding } from "../../src/verify/index.js";
 import type { ReviewContext } from "../../src/engine/contextAssembly.js";
 import type { LlmRouter } from "../../src/llm/types.js";
@@ -44,7 +45,7 @@ export async function runLocalReview(router: LlmRouter, local: LocalReviewContex
 
   for (const candidate of merged) {
     if (spentUsd >= opts.costCapUsd) break;
-    const outcome = await verifyFinding(router, candidate, filesByPath);
+    const outcome = await verifyFinding(router, candidate, filesByPath, undefined, diffTextForPath(local.prDiff, candidate.path) ?? undefined);
     spentUsd += outcome.costUsd;
     if (outcome.status !== "verified") continue; // precision-first — same policy as the PR bot (DESIGN.md §6.5)
     findings.push({

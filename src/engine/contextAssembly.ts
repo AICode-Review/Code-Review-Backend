@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PlatformAdapter } from "../adapters/types.js";
 import type { PrRef } from "../types/domain.js";
 import { getContext, type RepoContext } from "../indexer/context.js";
-import { buildPrDiff, type PrDiff } from "./diff.js";
+import { buildPrDiff, diffFileToPromptText, type PrDiff } from "./diff.js";
 import { isReviewableSourcePath } from "./binaryFiles.js";
 import { extractChangedSymbols } from "./changedSymbols.js";
 
@@ -96,16 +96,5 @@ export async function assembleContext(
 }
 
 export function prDiffToPromptText(prDiff: PrDiff): string {
-  return prDiff.files
-    .map((f) => {
-      const lines = f.lines
-        .map((l) => {
-          const marker = l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ";
-          const lineNo = l.newNo ?? l.oldNo ?? "";
-          return `${marker}${lineNo}: ${l.text}`;
-        })
-        .join("\n");
-      return `### DIFF: ${f.path} (+${f.additions}/-${f.deletions})\n${lines}`;
-    })
-    .join("\n\n");
+  return prDiff.files.map(diffFileToPromptText).join("\n\n");
 }

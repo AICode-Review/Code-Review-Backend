@@ -10,10 +10,65 @@ targets in DESIGN.md §1:
 ## Status
 
 **The scoring logic and dataset schema are real and tested** (`npm test`, all pure functions,
-no API keys needed). **The harness has not been run against the live engine yet** —
-`runHarness.ts`'s `reviewCase()` is a deliberately unimplemented integration point, not a bug.
-Running it for real means spending Anthropic/OpenAI API budget per case; that's a decision to
-make explicitly when there's a dataset and a reason to fund it, not a side effect of `npm test`.
+no API keys needed). **`reviewCase()` is now wired to the live engine** (`runAllPasses` →
+`mergeAndScore` → `verifyFinding`, the same pipeline `jobs/reviewRun.ts` uses, against a fake
+`ReviewContext` built directly from each case's `diff`/`files` — no adapter, db, or repo index
+needed since seed cases are self-contained).
+
+**First real run** (2026-08, OpenAI-only — `ANTHROPIC_API_KEY` was unset, so every pass and
+cross-examination ran on GPT models, not the intended Anthropic+OpenAI split):
+
+```
+Cases: 8  Caught: 6  Catch rate: 75.0%
+False positives: 0 total, 0.00 per case
+
+  ✓ sql-injection-fstring
+  ✓ off-by-one-pagination
+  ✓ missing-await-cleanup-loop
+  ✓ swallowed-payment-error
+  ✓ removed-null-check-billing
+  ✓ signature-change-breaks-caller
+  ✗ stale-test-after-threshold-change
+  ✗ xss-unescaped-comment-render
+```
+
+Investigating the `xss-unescaped-comment-render` miss (added a one-off debug script, not
+committed) found the specialist passes had caught it correctly at high confidence (security
+pass: 0.99) — it was cross-examination that rejected it, because `crossExamine()` only ever
+gave the skeptic model the current file content, never the PR's diff. The finding's claim was
+inherently a before/after one ("escaping was removed"), which is unconfirmable without seeing
+what changed. Fixed in `verify/crossExamine.ts` / `engine/prompts/cross_exam.v2.md`: the
+skeptic is now shown this PR's diff for the finding's file (via the new
+`engine/diff.ts#diffTextForPath`), when the caller has one.
+
+**Second run, same day, after the cross-exam diff-context fix** (still OpenAI-only):
+
+```
+Cases: 8  Caught: 7  Catch rate: 87.5%
+False positives: 0 total, 0.00 per case
+
+  ✓ sql-injection-fstring
+  ✓ off-by-one-pagination
+  ✗ missing-await-cleanup-loop
+  ✓ swallowed-payment-error
+  ✓ removed-null-check-billing
+  ✓ signature-change-breaks-caller
+  ✓ stale-test-after-threshold-change
+  ✓ xss-unescaped-comment-render
+```
+
+`xss-unescaped-comment-render` now catches, as intended, and `stale-test-after-threshold-change`
+(also a before/after claim) flipped to caught too. `missing-await-cleanup-loop` flipped from
+caught to missed — plausibly ordinary run-to-run LLM variance rather than something this change
+caused (nothing about that case's cross-exam prompt should have changed), but there's no
+repeat-run data yet to rule that out either way.
+
+Both runs clear the DESIGN.md §1 targets (catch rate > 70%, false positives < 2/run). Treat
+these as early data points, not a stable baseline — 8 synthetic cases is a small sample, each
+number above is a single run (no repeat-run variance data yet), and neither run exercised real
+cross-vendor verification (see above). Re-run with a real `ANTHROPIC_API_KEY` configured,
+run repeatedly to characterize variance, and grow the dataset past 8 synthetic cases, before
+treating these numbers as publishable.
 
 ## Dataset
 
@@ -40,10 +95,13 @@ whoever adds the case.
 ```
 npm install
 npm test        # scoring logic + dataset validation — safe, no API keys, no cost
-npm run bench    # actually reviews every case with the live engine — needs ../.env's
-                 # ANTHROPIC_API_KEY + OPENAI_API_KEY, and real API spend. See runHarness.ts's
-                 # reviewCase() doc comment for the two ways to wire it to the live engine.
+npm run bench    # actually reviews every case with the live engine — real API spend
 ```
+
+`npm run bench` runs with `backend/` as its working directory (not `benchmarks/`) specifically
+so `env()` (backend/src/config.ts) resolves `../.env` → `backend/.env` correctly — dotenv finds
+`.env` relative to the process's current working directory, and `backend/.env` is where the
+real `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` live.
 
 ## Methodology
 
