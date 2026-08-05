@@ -108,6 +108,31 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => map[c]!);
 }
 
+export interface ContactSubmissionEmailArgs {
+  name: string;
+  email: string;
+  message: string;
+}
+
+/** Notifies CONTACT_INBOX_EMAIL of a new public "Contact us" form submission — the submission itself is always saved to contact_submissions regardless of whether this send succeeds. */
+export function contactSubmissionEmail(args: ContactSubmissionEmailArgs): EmailContent {
+  const subject = `New contact form submission from ${args.name}`;
+  const text = [
+    `Name: ${args.name}`,
+    `Email: ${args.email}`,
+    "",
+    args.message,
+  ].join("\n");
+
+  const html = `
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #18181b;">
+  <p style="font-size: 14px;"><strong>${escapeHtml(args.name)}</strong> &lt;${escapeHtml(args.email)}&gt;</p>
+  <p style="font-size: 14px; line-height: 1.6; white-space: pre-wrap;">${escapeHtml(args.message)}</p>
+</div>`.trim();
+
+  return { subject, html, text };
+}
+
 export function inviteEmail(args: InviteEmailArgs): EmailContent {
   const subject = `${args.inviterLabel} invited you to join ${args.orgName} on CodeFerret`;
   const text = [

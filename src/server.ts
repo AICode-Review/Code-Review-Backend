@@ -8,6 +8,7 @@ import { razorpayWebhookRoutes } from "./routes/razorpayWebhook.js";
 import { apiRoutes } from "./routes/api.js";
 import { adminRoutes } from "./routes/admin.js";
 import { bitbucketConnectRoutes } from "./routes/bitbucketConnect.js";
+import { contactRoutes } from "./routes/contact.js";
 import { stopBoss } from "./queue/index.js";
 import { captureError, initSentry } from "./observability/sentry.js";
 
@@ -67,6 +68,7 @@ export function buildServer() {
   app.register(apiRoutes);
   app.register(adminRoutes);
   app.register(bitbucketConnectRoutes);
+  app.register(contactRoutes);
 
   return app;
 }

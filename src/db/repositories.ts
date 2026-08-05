@@ -919,3 +919,12 @@ export async function getOrgOwnerEmail(db: SupabaseClient, orgId: string): Promi
   if (!user?.email) return null;
   return { email: user.email, handle: user.handle };
 }
+
+/** Public "Contact us" form submission (routes/contact.ts) — always persisted regardless of whether email notification is configured. */
+export async function insertContactSubmission(
+  db: SupabaseClient,
+  fields: { name: string; email: string; message: string },
+): Promise<void> {
+  const { error } = await db.from("contact_submissions").insert(fields);
+  if (error) throw new Error(`db: failed to save contact submission: ${error.message}`);
+}
