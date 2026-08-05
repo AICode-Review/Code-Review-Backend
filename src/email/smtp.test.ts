@@ -25,7 +25,20 @@ afterEach(() => {
 });
 
 async function freshEmailModule() {
-  return import("./smtp.js");
+  // Snapshot exactly what the test set up (or didn't) before importing. config.ts's
+  // `import "dotenv/config"` runs again as part of this import (module reset above)
+  // and reloads the real backend/.env — which has real SMTP creds — into whichever of
+  // these keys are currently unset, silently undoing a test's "nothing configured"
+  // setup. env() is still lazy at this point (nothing has called it yet), so restoring
+  // this exact snapshot right after import cancels that reload without touching
+  // anything the test itself deliberately set beforehand.
+  const before = Object.fromEntries(SMTP_ENV_KEYS.map((k) => [k, process.env[k]]));
+  const mod = await import("./smtp.js");
+  for (const k of SMTP_ENV_KEYS) {
+    if (before[k] === undefined) delete process.env[k];
+    else process.env[k] = before[k];
+  }
+  return mod;
 }
 
 const MESSAGE = { to: "new-hire@acme.dev", subject: "You're invited", html: "<p>hi</p>", text: "hi" };
