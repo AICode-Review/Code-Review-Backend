@@ -70,6 +70,20 @@ cross-vendor verification (see above). Re-run with a real `ANTHROPIC_API_KEY` co
 run repeatedly to characterize variance, and grow the dataset past 8 synthetic cases, before
 treating these numbers as publishable.
 
+**Since the second run**: `crossExamine()` only ever saw the finding's own file — for
+`signature-change-breaks-caller` specifically (a `contracts` finding whose entire claim is
+"`summary.ts`'s `computeTotal` still calls `applyDiscount` with only 2 args"), the skeptic had
+no way to actually check that caller and had to take the pass's word for it. Fixed: for
+`contracts` findings, `verifyFinding()` now also shows the skeptic every other file from the
+case/PR (`## Other files from this PR`) and, in production, the same best-effort repo-index
+text (`## Repository index context`) the originating pass saw — see `verify/crossExamine.ts`
+and `engine/prompts/{contracts,cross_exam}.v*.md`. `contracts.v1.md` itself was also fixed: it
+previously told the model "you do not have a cross-file symbol index," which was stale —
+`passRunner.ts` had already been feeding it `buildRepoContextBlock` output for a while, so the
+pass was being told to distrust evidence it was actually being given. Not yet re-run against
+the live engine to confirm the effect on `signature-change-breaks-caller`'s catch consistency —
+that's the next real run to do once a live key is available.
+
 ## Dataset
 
 `src/dataset/seed.ts` — 8 hand-authored cases (`source: "synthetic"`), each a small realistic
@@ -89,6 +103,44 @@ and a real `prUrl` — the schema and scoring already support both kinds side by
 `source: "real_pr"` on a case that isn't backed by a real, checkable PR URL; `scoring.test.ts`
 enforces that every `real_pr` case has one, but can't verify the URL is genuine — that's on
 whoever adds the case.
+
+### Mining real cases
+
+`src/dataset/mine.ts` (`npm run mine -- --repo <owner/name> [--limit N] [--depth N]`) automates
+the *finding* half of that real-PR work — not the *verifying* half, which still needs a human.
+It's an SZZ-style bug-introduction miner:
+
+1. Scans the target repo's history for commits whose message references an issue
+   (`fixes/closes/resolves #N`).
+2. For each, diffs it against its parent to find exactly which pre-fix lines it touched, then
+   `git blame`s those lines at the parent to find whichever commit last touched them.
+3. If that blamed commit is *itself* another fix/refactor commit (very common — a fix often
+   lands on top of an earlier patch, not the original bug), recurses back through it (up to 4
+   hops) rather than accepting a meta-commit as "the" introduction.
+4. Emits the resolved introducing commit's own diff/files as a **candidate** case, with its own
+   added lines as the expected-finding location, a heuristically-guessed category/severity (from
+   keywords in the fix commit's message), and — via GitHub's commit→PR API — a real `prUrl` when
+   one can be resolved.
+
+Output goes to stdout as JSON, not into the dataset. Every candidate needs a human to actually
+read the diff before it's promoted:
+
+- The blame-based pairing can still be wrong even after the meta-commit skip (blame just says
+  "who last touched this line," not "who introduced this specific bug" — it can land on an
+  unrelated refactor that happened to touch the same lines).
+- `category`/`severity` are keyword guesses from the fix commit's message, not a real
+  classification.
+- A missing `prUrl` (commit pushed directly, or squash-merged in a way GitHub can't map back)
+  means you need to find the real PR URL yourself before the case can be `source: "real_pr"`.
+
+Needs `git` and network access to `github.com`/`api.github.com`; no LLM key required (this is
+pure git history mining, decoupled from `npm run bench`'s scoring, which does need keys). Set
+`MINE_DEBUG=1` to see why each candidate fix-commit was accepted or rejected at every stage.
+
+In practice, on a small-to-medium repo, most candidate fix-commits get filtered out before
+producing anything (pure-addition fixes have no old-side lines to blame; many blame results are
+ambiguous or resolve to an oversized refactor) — a low yield-per-repo is expected and correct
+behavior, not a bug: it's the tool declining to guess rather than fabricating a pairing.
 
 ## Running
 

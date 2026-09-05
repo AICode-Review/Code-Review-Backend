@@ -8,6 +8,7 @@
   },
   "scripts": {
     "bench": "cd .. && tsx benchmarks/src/runHarness.ts",
+    "mine": "tsx src/dataset/mine.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
