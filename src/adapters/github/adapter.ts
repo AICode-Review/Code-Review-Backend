@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { App } from "@octokit/app";
 import { z } from "zod";
-import { SUMMARY_MARKER, type PlatformAdapter } from "../types.js";
+import { SUMMARY_MARKER, type ApplyFixParams, type PlatformAdapter } from "../types.js";
 import type {
   CheckStatus,
   CommentId,
@@ -242,7 +242,7 @@ export class GithubAdapter implements PlatformAdapter {
     return this.app.getInstallationOctokit(repo.installationId);
   }
 
-  async getPrInfo(pr: PrRef): Promise<{ headSha: string; title: string; author: string; baseSha: string }> {
+  async getPrInfo(pr: PrRef): Promise<{ headSha: string; headRef: string; title: string; author: string; baseSha: string }> {
     const kit = await this.octokit(pr.repo);
     const res = await kit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
       owner: pr.repo.owner,
@@ -250,13 +250,14 @@ export class GithubAdapter implements PlatformAdapter {
       pull_number: pr.number,
     });
     const data = res.data as {
-      head: { sha: string };
+      head: { sha: string; ref: string };
       base: { sha: string };
       title: string;
       user: { login: string } | null;
     };
     return {
       headSha: data.head.sha,
+      headRef: data.head.ref,
       baseSha: data.base.sha,
       title: data.title,
       author: data.user?.login ?? "unknown",
@@ -285,6 +286,41 @@ export class GithubAdapter implements PlatformAdapter {
     const data = res.data as { content?: string; encoding?: string };
     if (!data.content) throw new Error(`No content for ${path}@${sha}`);
     return Buffer.from(data.content, (data.encoding as BufferEncoding) ?? "base64").toString("utf8");
+  }
+
+  /**
+   * GitHub's "create or update file contents" endpoint requires the existing file's blob
+   * sha as an optimistic-concurrency check ONLY when the file already exists — fetched fresh
+   * here rather than trusted from an earlier call, since the whole point of apply-fix's
+   * staleness check (engine/applyFix.ts) is that the file may have changed since the review
+   * ran. A 404 here means this is a brand-new file (e.g. engine/testGen.ts committing a test
+   * file that doesn't exist yet) — omitting `sha` entirely tells the API to create it rather
+   * than update it. Any other error still propagates; only "doesn't exist" is expected here.
+   */
+  async applyFix(pr: PrRef, params: ApplyFixParams): Promise<void> {
+    const kit = await this.octokit(pr.repo);
+    let blobSha: string | undefined;
+    try {
+      const current = await kit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+        owner: pr.repo.owner,
+        repo: pr.repo.name,
+        path: params.path,
+        ref: params.branch,
+      });
+      blobSha = (current.data as { sha: string }).sha;
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      if (status !== 404) throw err;
+    }
+    await kit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
+      owner: pr.repo.owner,
+      repo: pr.repo.name,
+      path: params.path,
+      message: params.message,
+      content: Buffer.from(params.newContent, "utf8").toString("base64"),
+      sha: blobSha,
+      branch: params.branch,
+    });
   }
 
   async cloneUrl(repo: RepoRef): Promise<string> {

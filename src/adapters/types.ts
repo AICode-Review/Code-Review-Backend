@@ -13,6 +13,14 @@ import type {
 /** Embedded in our summary comment on every platform so re-runs update it in place instead of posting a duplicate. */
 export const SUMMARY_MARKER = "<!-- codeferret:summary -->";
 
+export interface ApplyFixParams {
+  path: string;
+  /** Branch NAME (not a sha) — both platforms' "commit a file change" APIs operate on a branch, not a raw commit. */
+  branch: string;
+  newContent: string;
+  message: string;
+}
+
 /**
  * One interface, two implementations (GitHub, Bitbucket).
  * The engine never knows which platform it's on.
@@ -24,9 +32,11 @@ export interface PlatformAdapter {
   verifyWebhook(headers: Record<string, string | string[] | undefined>, rawBody: Buffer): boolean;
   parseEvent(payload: unknown): NormalizedEvent | null;
   getDiff(pr: PrRef): Promise<UnifiedDiff>;
-  /** Current head sha + title/author for a PR — used by manual trigger/rerun, where we don't yet have a webhook payload. */
-  getPrInfo(pr: PrRef): Promise<{ headSha: string; title: string; author: string; baseSha: string }>;
+  /** Current head sha/branch + title/author for a PR — used by manual trigger/rerun (where we don't yet have a webhook payload) and by apply-fix (which needs the branch NAME to commit onto). */
+  getPrInfo(pr: PrRef): Promise<{ headSha: string; headRef: string; title: string; author: string; baseSha: string }>;
   getFile(repo: RepoRef, path: string, sha: string): Promise<string>;
+  /** Commits a single-file change directly onto a branch — backs "apply suggested fix" (engine/applyFix.ts). Throws on failure; never partially applies. */
+  applyFix(pr: PrRef, params: ApplyFixParams): Promise<void>;
   /** tokenized shallow-clone URL */
   cloneUrl(repo: RepoRef): Promise<string>;
   postSummary(pr: PrRef, body: Markdown): Promise<CommentId>;

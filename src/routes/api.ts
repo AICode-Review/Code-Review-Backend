@@ -17,6 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   connectBitbucketWorkspace,
   formatUsageLimitMessage,
+  getFindingApplyFixContext,
   getFindingOrgContext,
   getOrgPlan,
   getOrgSeatLimit,
@@ -24,15 +25,25 @@ import {
   getPrRefByRunId,
   getRepoConfig,
   getRepoOrgId,
+  getGeneratedTest,
+  getRepoRefById,
   getRepoRefByName,
   getRunOrgId,
   listBitbucketWorkspacesForUser,
+  listRepoChatMessages,
   recordAudit,
+  recordFixApplied,
+  saveGeneratedTest,
+  saveRepoChatMessage,
   upsertPrChain,
   type OrgPlan,
 } from "../db/repositories.js";
 import { encryptionConfigured } from "../security/tokenCrypto.js";
 import { buildPrDiff } from "../engine/diff.js";
+import { planFixApplication } from "../engine/applyFix.js";
+import { conventionalTestPath, generateTestFile, validateGeneratedTestFile } from "../engine/testGen.js";
+import { answerRepoChat } from "../engine/repoChat.js";
+import { createLlmRouter } from "../llm/router.js";
 import { enqueueIndexRepo, enqueueReviewRunNow, enqueueRulebookCompile } from "../queue/index.js";
 import { buildWeeklyAnalytics, categoryCounts } from "./analyticsAggregation.js";
 import { env } from "../config.js";
@@ -69,6 +80,10 @@ const OnboardingFinishSchema = z.object({
 
 const FeedbackSchema = z.object({
   feedback: z.enum(["accepted", "dismissed", "fixed", "ignored"]),
+});
+
+const RepoChatSchema = z.object({
+  question: z.string().min(1).max(2000),
 });
 
 const InviteCreateSchema = z.object({
@@ -131,12 +146,14 @@ async function requirePlan(
 ): Promise<{ ok: true } | { ok: false; status: number; error: string; message: string }> {
   const plan = await getOrgPlan(db, orgId);
   if (PLAN_RANK[plan] < PLAN_RANK[minimum]) {
-    const tierName = minimum === "team" ? "Team" : "Pro";
+    // "requires the X plan" (not "is an X-plan feature") sidesteps having to pick a/an per
+    // tier name — matters now that "pro" displays as "Individual" (a vowel-led word).
+    const tierName = minimum === "team" ? "Team" : "Individual";
     return {
       ok: false,
       status: 402,
       error: `${minimum}_plan_required`,
-      message: `${featureLabel} is a ${tierName}-plan feature. Upgrade to unlock it.`,
+      message: `${featureLabel} requires the ${tierName} plan. Upgrade to unlock it.`,
     };
   }
   return { ok: true };
@@ -444,6 +461,58 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     await enqueueIndexRepo({ repoId, reason: "manual" });
     await recordAudit(db, orgId, actorLabel(req.authedUser!), "repo.reindex_triggered", repoId);
     return reply.send({ ok: true });
+  });
+
+  // ------------------------------------------------------------- repo chat
+
+  /**
+   * Full-codebase chat — "ask a question about this repo," not just a specific finding
+   * (DESIGN.md-style competitive gap vs. Greptile). Conversation is per-user, per-repo:
+   * repo_chat_messages has RLS on with no policies (backend-only), so both routes are the
+   * only way to read or write it — there's no parallel direct-Supabase path to keep in sync.
+   */
+  app.get<{ Params: { id: string } }>("/api/repos/:id/chat", async (req, reply) => {
+    const db = getDb();
+    const { id: repoId } = req.params;
+    const orgId = await getRepoOrgId(db, repoId);
+    if (!orgId) return reply.code(404).send({ error: "repo not found" });
+    if (!(await ensureOrgAccess(db, req.authedUser!, orgId))) return reply.code(403).send({ error: "not a member of this org" });
+
+    const chatPlan = await requirePlan(db, orgId, "pro", "Ask the codebase");
+    if (!chatPlan.ok) return reply.code(chatPlan.status).send({ error: chatPlan.error, message: chatPlan.message });
+
+    const messages = await listRepoChatMessages(db, repoId, req.authedUser!.id);
+    return reply.send({ messages });
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/repos/:id/chat", async (req, reply) => {
+    const parsed = RepoChatSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+
+    const db = getDb();
+    const { id: repoId } = req.params;
+    const orgId = await getRepoOrgId(db, repoId);
+    if (!orgId) return reply.code(404).send({ error: "repo not found" });
+    if (!(await ensureOrgAccess(db, req.authedUser!, orgId))) return reply.code(403).send({ error: "not a member of this org" });
+
+    const chatPlan = await requirePlan(db, orgId, "pro", "Ask the codebase");
+    if (!chatPlan.ok) return reply.code(chatPlan.status).send({ error: chatPlan.error, message: chatPlan.message });
+
+    const repo = await getRepoRefById(db, repoId);
+    if (!repo) return reply.code(404).send({ error: "repo not found" });
+
+    const userId = req.authedUser!.id;
+    await saveRepoChatMessage(db, repoId, userId, "user", parsed.data.question);
+
+    const adapter = getAdapter(repo.platform);
+    const router = createLlmRouter();
+    const result = await answerRepoChat(router, db, adapter, repo, repoId, parsed.data.question);
+    if (!result) {
+      return reply.code(502).send({ error: "chat_failed", message: "Couldn't produce an answer — try rephrasing the question." });
+    }
+
+    await saveRepoChatMessage(db, repoId, userId, "assistant", result.answer, result.sources, result.costUsd);
+    return reply.send({ answer: result.answer, sources: result.sources });
   });
 
   // -------------------------------------------------------------- rulebook
@@ -766,5 +835,265 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send({ ok: true });
+  });
+
+  // ------------------------------------------------------------- apply-fix
+
+  /**
+   * One-click commit of a verified finding's suggestedFix onto the PR's own branch —
+   * requires re-fetching the file fresh (never trusts anything cached from review time) and
+   * re-checking it against the finding's stored codeSnippet via engine/applyFix.ts, since the
+   * branch may have moved since the review ran. Gated at admin role + Pro plan: this pushes a
+   * real commit to the customer's repo, a meaningfully bigger blast radius than dismissing a
+   * finding or triggering a re-review, so it gets the same bar as org-membership writes rather
+   * than the lower "any member" bar the feedback route above uses.
+   */
+  app.post<{ Params: { id: string } }>("/api/findings/:id/apply-fix", async (req, reply) => {
+    const db = getDb();
+    const { id: findingId } = req.params;
+    const ctx = await getFindingApplyFixContext(db, findingId);
+    if (!ctx) return reply.code(404).send({ error: "finding not found" });
+
+    const authz = await requireRole(db, req.authedUser!, ctx.orgId, "admin");
+    if (!authz.ok) return reply.code(authz.status).send({ error: authz.error });
+
+    const fixPlan = await requirePlan(db, ctx.orgId, "pro", "Auto-apply suggested fixes");
+    if (!fixPlan.ok) return reply.code(fixPlan.status).send({ error: fixPlan.error, message: fixPlan.message });
+
+    if (ctx.appliedAt) {
+      return reply.code(409).send({
+        error: "already_applied",
+        message: ctx.appliedCommitSha
+          ? `This fix was already applied as commit ${ctx.appliedCommitSha.slice(0, 7)}.`
+          : "This fix was already applied.",
+      });
+    }
+    if (ctx.category === "tests") {
+      // A "tests" finding's suggestedFix is a test snippet meant for a DIFFERENT file (a test
+      // file, often one that doesn't exist yet) — not a same-location replacement of
+      // [startLine, endLine] in ctx.path the way every other category's suggestedFix is
+      // documented to be. Splicing it in here would corrupt the flagged production file.
+      // engine/testGen.ts's generate-test/commit-test routes below are the correct path.
+      return reply.code(400).send({
+        error: "wrong_endpoint_for_category",
+        message: "Missing-test-coverage findings can't be auto-applied here — use \"Generate test file\" instead.",
+      });
+    }
+    if (!ctx.suggestedFix || !ctx.codeSnippet) {
+      return reply.code(400).send({ error: "no_suggested_fix", message: "This finding has no suggested fix to apply." });
+    }
+    if (ctx.verificationStatus !== "verified" || !ctx.posted) {
+      return reply
+        .code(400)
+        .send({ error: "not_verified", message: "Only verified, posted findings can have their fix auto-applied." });
+    }
+    if (ctx.prState !== "open") {
+      return reply.code(409).send({ error: "pr_not_open", message: "This pull request is no longer open." });
+    }
+
+    const { getOrgSuspension } = await import("../db/adminRepositories.js");
+    const suspension = await getOrgSuspension(db, ctx.orgId);
+    if (suspension.suspended) {
+      return reply.code(403).send({
+        error: "org_suspended",
+        message: suspension.suspendedReason
+          ? `This organization is suspended: ${suspension.suspendedReason}`
+          : "This organization is suspended. Contact support.",
+      });
+    }
+
+    const { pr } = await getPrRefByRunId(db, ctx.runId);
+    const adapter = getAdapter(pr.repo.platform);
+
+    let currentContent: string;
+    let headRef: string;
+    try {
+      const info = await adapter.getPrInfo(pr);
+      headRef = info.headRef;
+      currentContent = await adapter.getFile(pr.repo, ctx.path, headRef);
+    } catch (err) {
+      return reply.code(502).send({ error: "fetch_failed", message: err instanceof Error ? err.message : "Failed to read the current file from the platform." });
+    }
+
+    const plan = planFixApplication(currentContent, ctx.startLine, ctx.endLine, ctx.codeSnippet, ctx.suggestedFix);
+    if (!plan.ok) {
+      return reply.code(409).send({ error: "stale", message: plan.reason });
+    }
+
+    const message = `Apply CodeFerret suggested fix: ${ctx.path}:${ctx.startLine}-${ctx.endLine}`;
+    try {
+      await adapter.applyFix(pr, { path: ctx.path, branch: headRef, newContent: plan.newContent, message });
+    } catch (err) {
+      return reply.code(502).send({ error: "apply_failed", message: err instanceof Error ? err.message : "Failed to commit the fix." });
+    }
+
+    const updated = await adapter.getPrInfo(pr).catch(() => null);
+    const commitSha = updated?.headSha ?? "unknown";
+    await recordFixApplied(db, findingId, req.authedUser!.id, commitSha);
+    await db
+      .from("learning_events")
+      .insert({ org_id: ctx.orgId, repo_id: ctx.repoId, finding_id: findingId, event_type: "fix_applied" });
+    await recordAudit(db, ctx.orgId, actorLabel(req.authedUser!), "finding.fix_applied", `${pr.repo.owner}/${pr.repo.name}#${pr.number}`, {
+      findingId,
+      path: ctx.path,
+      commitSha,
+    });
+
+    return reply.send({ ok: true, commitSha });
+  });
+
+  // ------------------------------------------------------------- test-gen
+
+  /**
+   * Auto-generate an actual runnable test file for a "tests"-category finding — closes a real
+   * gap vs Qodo's test generation, rather than just flagging missing coverage in prose.
+   * Generation itself is read-only/non-destructive (nothing is committed), so it's gated at
+   * plan tier only, same bar as the feedback route — the higher admin-role bar below is
+   * reserved for the actual commit.
+   */
+  app.post<{ Params: { id: string } }>("/api/findings/:id/generate-test", async (req, reply) => {
+    const db = getDb();
+    const { id: findingId } = req.params;
+    const ctx = await getFindingApplyFixContext(db, findingId);
+    if (!ctx) return reply.code(404).send({ error: "finding not found" });
+    if (!(await ensureOrgAccess(db, req.authedUser!, ctx.orgId))) return reply.code(403).send({ error: "not a member of this org" });
+
+    const genPlan = await requirePlan(db, ctx.orgId, "pro", "Auto-generate test files");
+    if (!genPlan.ok) return reply.code(genPlan.status).send({ error: genPlan.error, message: genPlan.message });
+
+    if (ctx.category !== "tests") {
+      return reply.code(400).send({ error: "wrong_category", message: "Test generation only applies to missing-test-coverage findings." });
+    }
+    if (ctx.verificationStatus !== "verified") {
+      // Unlike apply-fix, `posted` doesn't gate this: whether a verified finding became an
+      // actual line comment or only made it into the digest is a comment-BUDGET decision,
+      // orthogonal to whether it's worth generating a test for.
+      return reply.code(400).send({ error: "not_verified", message: "Only verified findings can have a test generated." });
+    }
+
+    const testPathPlan = conventionalTestPath(ctx.path);
+    if (!testPathPlan.ok) {
+      return reply.code(400).send({ error: "unsupported_language", message: testPathPlan.reason });
+    }
+
+    const { pr } = await getPrRefByRunId(db, ctx.runId);
+    const adapter = getAdapter(pr.repo.platform);
+
+    let sourceContent: string;
+    let existingTestContent: string | null;
+    try {
+      const info = await adapter.getPrInfo(pr);
+      sourceContent = await adapter.getFile(pr.repo, ctx.path, info.headRef);
+      existingTestContent = await adapter.getFile(pr.repo, testPathPlan.testFilePath, info.headRef).catch(() => null);
+    } catch (err) {
+      return reply.code(502).send({ error: "fetch_failed", message: err instanceof Error ? err.message : "Failed to read files from the platform." });
+    }
+
+    const { data: findingRow } = await db
+      .from("findings")
+      .select("title, body_md, why_it_matters, impact, suggested_fix")
+      .eq("id", findingId)
+      .maybeSingle();
+    if (!findingRow) return reply.code(404).send({ error: "finding not found" });
+
+    const router = createLlmRouter();
+    const generated = await generateTestFile(router, ctx.path, sourceContent, testPathPlan.testFilePath, existingTestContent, {
+      title: findingRow.title as string,
+      bodyMd: findingRow.body_md as string,
+      whyItMatters: findingRow.why_it_matters as string,
+      impact: findingRow.impact as string,
+      suggestedFix: (findingRow.suggested_fix as string | null) ?? null,
+    });
+    if (!generated) {
+      return reply.code(502).send({ error: "generation_failed", message: "Couldn't generate a test — try again." });
+    }
+
+    const check = await validateGeneratedTestFile(testPathPlan.testFilePath, generated.fileContent);
+    if (!check.valid) {
+      return reply.code(502).send({ error: "generation_invalid", message: `Generated test failed a sanity check: ${check.reason}` });
+    }
+
+    await saveGeneratedTest(db, findingId, testPathPlan.testFilePath, generated.fileContent);
+    return reply.send({ testFilePath: testPathPlan.testFilePath, fileContent: generated.fileContent });
+  });
+
+  /**
+   * Commits the LAST generated preview for this finding — reads it back from the DB rather
+   * than trusting anything the client sends, the same "never trust a client-supplied factual
+   * claim" rule apply-fix follows for path/lines. Gated at admin role, same bar as apply-fix:
+   * this is the step that actually pushes a commit to the customer's repo.
+   */
+  app.post<{ Params: { id: string } }>("/api/findings/:id/commit-test", async (req, reply) => {
+    const db = getDb();
+    const { id: findingId } = req.params;
+    const ctx = await getFindingApplyFixContext(db, findingId);
+    if (!ctx) return reply.code(404).send({ error: "finding not found" });
+
+    const authz = await requireRole(db, req.authedUser!, ctx.orgId, "admin");
+    if (!authz.ok) return reply.code(authz.status).send({ error: authz.error });
+
+    const testPlan = await requirePlan(db, ctx.orgId, "pro", "Auto-generate test files");
+    if (!testPlan.ok) return reply.code(testPlan.status).send({ error: testPlan.error, message: testPlan.message });
+
+    if (ctx.appliedAt) {
+      return reply.code(409).send({
+        error: "already_applied",
+        message: ctx.appliedCommitSha ? `A test was already committed as ${ctx.appliedCommitSha.slice(0, 7)}.` : "A test was already committed for this finding.",
+      });
+    }
+    if (ctx.prState !== "open") {
+      return reply.code(409).send({ error: "pr_not_open", message: "This pull request is no longer open." });
+    }
+
+    const generated = await getGeneratedTest(db, findingId);
+    if (!generated) {
+      return reply.code(400).send({ error: "not_generated", message: "Generate a test first, then commit it." });
+    }
+
+    // Defense in depth: re-validate even though generate-test already checked this exact
+    // content — cheap, and guards against the (unexpected) case of stored content that
+    // predates a stricter check being added later.
+    const check = await validateGeneratedTestFile(generated.testFilePath, generated.fileContent);
+    if (!check.valid) {
+      return reply.code(502).send({ error: "generation_invalid", message: `Stored generated test failed a sanity check: ${check.reason}` });
+    }
+
+    const { getOrgSuspension } = await import("../db/adminRepositories.js");
+    const suspension = await getOrgSuspension(db, ctx.orgId);
+    if (suspension.suspended) {
+      return reply.code(403).send({
+        error: "org_suspended",
+        message: suspension.suspendedReason ? `This organization is suspended: ${suspension.suspendedReason}` : "This organization is suspended. Contact support.",
+      });
+    }
+
+    const { pr } = await getPrRefByRunId(db, ctx.runId);
+    const adapter = getAdapter(pr.repo.platform);
+
+    let headRef: string;
+    try {
+      headRef = (await adapter.getPrInfo(pr)).headRef;
+    } catch (err) {
+      return reply.code(502).send({ error: "fetch_failed", message: err instanceof Error ? err.message : "Failed to read the PR from the platform." });
+    }
+
+    const message = `Add test coverage: ${generated.testFilePath}`;
+    try {
+      await adapter.applyFix(pr, { path: generated.testFilePath, branch: headRef, newContent: generated.fileContent, message });
+    } catch (err) {
+      return reply.code(502).send({ error: "commit_failed", message: err instanceof Error ? err.message : "Failed to commit the test file." });
+    }
+
+    const updated = await adapter.getPrInfo(pr).catch(() => null);
+    const commitSha = updated?.headSha ?? "unknown";
+    await recordFixApplied(db, findingId, req.authedUser!.id, commitSha);
+    await db.from("learning_events").insert({ org_id: ctx.orgId, repo_id: ctx.repoId, finding_id: findingId, event_type: "fix_applied" });
+    await recordAudit(db, ctx.orgId, actorLabel(req.authedUser!), "finding.test_committed", `${pr.repo.owner}/${pr.repo.name}#${pr.number}`, {
+      findingId,
+      testFilePath: generated.testFilePath,
+      commitSha,
+    });
+
+    return reply.send({ ok: true, commitSha, testFilePath: generated.testFilePath });
   });
 }

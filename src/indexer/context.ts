@@ -15,6 +15,8 @@ export interface SimilarChunk {
   startLine: number;
   endLine: number;
   similarity: number;
+  /** The blob sha this chunk was indexed from — lets a caller fetch the exact content the chunk was embedded from (adapter.getFile(repo, path, sha)) rather than guessing at current HEAD. */
+  sha: string;
 }
 
 export interface RepoContext {
@@ -156,6 +158,7 @@ export async function getContext(
             startLine: r["start_line"] as number,
             endLine: r["end_line"] as number,
             similarity: r["similarity"] as number,
+            sha: r["sha"] as string,
           }));
         }
       }

@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { SUMMARY_MARKER, type PlatformAdapter } from "../types.js";
+import { SUMMARY_MARKER, type ApplyFixParams, type PlatformAdapter } from "../types.js";
 import type {
   CheckStatus,
   CommentId,
@@ -211,15 +211,16 @@ export class BitbucketAdapter implements PlatformAdapter {
     return (await res.json()) as T;
   }
 
-  async getPrInfo(pr: PrRef): Promise<{ headSha: string; title: string; author: string; baseSha: string }> {
+  async getPrInfo(pr: PrRef): Promise<{ headSha: string; headRef: string; title: string; author: string; baseSha: string }> {
     const data = await this.request<{
-      source: { commit: { hash: string } };
+      source: { commit: { hash: string }; branch: { name: string } };
       destination: { commit: { hash: string } };
       title: string;
       author?: { nickname?: string; display_name?: string };
     }>(pr.repo, "GET", `/repositories/${pr.repo.owner}/${pr.repo.name}/pullrequests/${pr.number}`);
     return {
       headSha: data.source.commit.hash,
+      headRef: data.source.branch.name,
       baseSha: data.destination.commit.hash,
       title: data.title,
       author: data.author?.nickname ?? data.author?.display_name ?? "unknown",
@@ -243,6 +244,30 @@ export class BitbucketAdapter implements PlatformAdapter {
     });
     if (!res.ok) throw new Error(`Bitbucket file fetch failed for ${path}@${sha}: ${res.status}`);
     return res.text();
+  }
+
+  /**
+   * Bitbucket Cloud has no equivalent of GitHub's "create or update file contents" JSON
+   * endpoint — committing a file change is POST .../src as multipart/form-data, with the
+   * file's path itself as the form field name (not a fixed field like "content"). No blob-sha
+   * concurrency check exists on this endpoint; engine/applyFix.ts's own staleness check
+   * (comparing the freshly-fetched file against the finding's stored snippet) is the only
+   * guard against a stale apply, same as it is for GitHub.
+   */
+  async applyFix(pr: PrRef, params: ApplyFixParams): Promise<void> {
+    const token = await this.accessToken(pr.repo);
+    const form = new FormData();
+    form.set(params.path, new Blob([params.newContent]));
+    form.set("message", params.message);
+    form.set("branch", params.branch);
+    const res = await fetch(`${API_BASE}/repositories/${pr.repo.owner}/${pr.repo.name}/src`, {
+      method: "POST",
+      headers: { Authorization: bitbucketAuthorizationHeader(token) },
+      body: form,
+    });
+    if (!res.ok) {
+      throw new Error(`Bitbucket apply-fix commit failed: ${res.status} ${await res.text().catch(() => "")}`);
+    }
   }
 
   async cloneUrl(repo: RepoRef): Promise<string> {

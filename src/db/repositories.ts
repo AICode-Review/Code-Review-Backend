@@ -369,6 +369,126 @@ export async function getFindingOrgContext(
   return { ...ctx, runId: finding.run_id as string, fingerprint: finding.fingerprint as string };
 }
 
+export interface FindingApplyFixContext {
+  findingId: string;
+  orgId: string;
+  repoId: string;
+  runId: string;
+  prId: string;
+  category: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  suggestedFix: string | null;
+  codeSnippet: string | null;
+  verificationStatus: string;
+  posted: boolean;
+  appliedAt: string | null;
+  appliedCommitSha: string | null;
+  prState: string;
+}
+
+/** Everything POST /api/findings/:id/apply-fix needs in one place — org/plan/role gating, staleness check, and the PR ref to call the adapter with. */
+export async function getFindingApplyFixContext(db: SupabaseClient, findingId: string): Promise<FindingApplyFixContext | null> {
+  const { data: finding } = await db
+    .from("findings")
+    .select("id, run_id, category, path, start_line, end_line, suggested_fix, code_snippet, verification_status, posted, applied_at, applied_commit_sha")
+    .eq("id", findingId)
+    .maybeSingle();
+  if (!finding) return null;
+  const ctx = await getRunOrgId(db, finding.run_id as string);
+  if (!ctx) return null;
+  const { data: pr } = await db.from("pull_requests").select("state").eq("id", ctx.prId).maybeSingle();
+  return {
+    findingId: finding.id as string,
+    orgId: ctx.orgId,
+    repoId: ctx.repoId,
+    runId: finding.run_id as string,
+    prId: ctx.prId,
+    category: finding.category as string,
+    path: finding.path as string,
+    startLine: finding.start_line as number,
+    endLine: finding.end_line as number,
+    suggestedFix: (finding.suggested_fix as string | null) ?? null,
+    codeSnippet: (finding.code_snippet as string | null) ?? null,
+    verificationStatus: finding.verification_status as string,
+    posted: Boolean(finding.posted),
+    appliedAt: (finding.applied_at as string | null) ?? null,
+    appliedCommitSha: (finding.applied_commit_sha as string | null) ?? null,
+    prState: (pr?.state as string | undefined) ?? "open",
+  };
+}
+
+/** Records a successful apply-fix (or a committed generated test — same underlying fact: "a commit was made addressing this finding") — also sets feedback='fixed', a stronger signal than the same value's existing meaning as a user's self-reported "I fixed this myself"; both correctly count toward acceptancePct. */
+export async function recordFixApplied(db: SupabaseClient, findingId: string, appliedBy: string, commitSha: string): Promise<void> {
+  const { error } = await db
+    .from("findings")
+    .update({ applied_at: new Date().toISOString(), applied_by: appliedBy, applied_commit_sha: commitSha, feedback: "fixed" })
+    .eq("id", findingId);
+  if (error) throw new Error(`db: failed to record applied fix for finding ${findingId}: ${error.message}`);
+}
+
+/** The preview a prior POST /api/findings/:id/generate-test call produced — POST .../commit-test reads this back rather than trusting anything the client echoes, so a large generated file only ever needs to be generated (and re-validated) once per preview. */
+export async function getGeneratedTest(db: SupabaseClient, findingId: string): Promise<{ testFilePath: string; fileContent: string } | null> {
+  const { data } = await db
+    .from("findings")
+    .select("generated_test_path, generated_test_content")
+    .eq("id", findingId)
+    .maybeSingle();
+  if (!data?.generated_test_path || !data.generated_test_content) return null;
+  return { testFilePath: data.generated_test_path as string, fileContent: data.generated_test_content as string };
+}
+
+export async function saveGeneratedTest(db: SupabaseClient, findingId: string, testFilePath: string, fileContent: string): Promise<void> {
+  const { error } = await db
+    .from("findings")
+    .update({ generated_test_path: testFilePath, generated_test_content: fileContent, generated_test_generated_at: new Date().toISOString() })
+    .eq("id", findingId);
+  if (error) throw new Error(`db: failed to save generated test for finding ${findingId}: ${error.message}`);
+}
+
+export interface RepoChatMessageRow {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  sources: Array<{ path: string; startLine: number; endLine: number; similarity: number }>;
+  createdAt: string;
+}
+
+/** Conversation is per-user, per-repo — repo_chat_messages has RLS on with no policies (backend-only, same posture as platform_tokens), so this is the only read path. */
+export async function listRepoChatMessages(db: SupabaseClient, repoId: string, userId: string, limit = 50): Promise<RepoChatMessageRow[]> {
+  const { data, error } = await db
+    .from("repo_chat_messages")
+    .select("id, role, content, sources, created_at")
+    .eq("repo_id", repoId)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true })
+    .limit(limit);
+  if (error) throw new Error(`db: failed to load repo chat history for repo ${repoId}: ${error.message}`);
+  return (data ?? []).map((row) => ({
+    id: row.id as string,
+    role: row.role as "user" | "assistant",
+    content: row.content as string,
+    sources: (row.sources as RepoChatMessageRow["sources"] | null) ?? [],
+    createdAt: row.created_at as string,
+  }));
+}
+
+export async function saveRepoChatMessage(
+  db: SupabaseClient,
+  repoId: string,
+  userId: string,
+  role: "user" | "assistant",
+  content: string,
+  sources: RepoChatMessageRow["sources"] = [],
+  costUsd = 0,
+): Promise<void> {
+  const { error } = await db
+    .from("repo_chat_messages")
+    .insert({ repo_id: repoId, user_id: userId, role, content, sources, cost_usd: costUsd });
+  if (error) throw new Error(`db: failed to save repo chat message for repo ${repoId}: ${error.message}`);
+}
+
 /**
  * Authoritative org creation — the GitHub installation webhook is the only
  * source of truth for orgs. `kind` follows GitHub's own account type

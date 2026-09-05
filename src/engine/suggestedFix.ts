@@ -14,7 +14,8 @@ export interface SuggestedFixCheck {
   reason?: string;
 }
 
-const PLACEHOLDER_PATTERNS: RegExp[] = [
+/** Exported for engine/testGen.ts, which runs the same "no placeholder markers" sanity check against a generated test file's full content rather than a same-location code splice. */
+export const PLACEHOLDER_PATTERNS: RegExp[] = [
   /\.\.\./,
   /\btodo\b/i,
   /\bfixme\b/i,
