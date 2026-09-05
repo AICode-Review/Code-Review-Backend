@@ -141,6 +141,34 @@ describe("buildSummaryMarkdown", () => {
     });
     expect(md).toContain("No high-severity verified findings this run.");
   });
+
+  it("includes the AI-generated walkthrough near the top when provided", () => {
+    const md = buildSummaryMarkdown({
+      prStats: { files: 1, additions: 5, deletions: 1 },
+      posted: [],
+      digest: [],
+      rejected: [],
+      skippedPasses: [],
+      costUsd: 0,
+      walkthrough: "Adds a cap parameter to applyDiscount so the discount can never exceed a fixed amount.",
+    });
+    expect(md).toContain("Adds a cap parameter to applyDiscount");
+    // Appears before the risk line, not buried after the findings.
+    expect(md.indexOf("Adds a cap parameter")).toBeLessThan(md.indexOf("Risk:"));
+  });
+
+  it("omits the walkthrough section entirely when generation didn't produce one", () => {
+    const md = buildSummaryMarkdown({
+      prStats: { files: 1, additions: 1, deletions: 0 },
+      posted: [],
+      digest: [],
+      rejected: [],
+      skippedPasses: [],
+      costUsd: 0,
+    });
+    // No stray blank walkthrough block — the risk line follows directly after the header.
+    expect(md).toMatch(/### 🤖 AI Review\n\n\*\*Risk:/);
+  });
 });
 
 describe("buildLineCommentBody", () => {

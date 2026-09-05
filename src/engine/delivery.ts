@@ -86,6 +86,10 @@ export interface SummaryArgs {
   skippedPasses: string[];
   costUsd: number;
   staleIndex?: boolean;
+  /** AI-generated plain-English "what does this diff do" orientation (engine/prWalkthrough.ts)
+   * — undefined when generation failed schema validation or wasn't attempted; the summary
+   * comment reads fine without it, this is a bonus, not a load-bearing section. */
+  walkthrough?: string;
 }
 
 const RISK_LABEL: Record<RiskLevel, string> = { high: "🔴 high", medium: "🟡 medium", low: "🟢 low", none: "✅ none" };
@@ -93,13 +97,16 @@ const RISK_LABEL: Record<RiskLevel, string> = { high: "🔴 high", medium: "🟡
 /** DESIGN.md §6.6 — single summary comment, updated in place on re-runs. */
 export function buildSummaryMarkdown(args: SummaryArgs): string {
   const risk = computeRiskLevel(args.posted);
-  const lines: string[] = [
-    SUMMARY_MARKER,
-    "### 🤖 AI Review",
-    "",
+  const lines: string[] = [SUMMARY_MARKER, "### 🤖 AI Review", ""];
+
+  if (args.walkthrough) {
+    lines.push(args.walkthrough, "");
+  }
+
+  lines.push(
     `**Risk: ${RISK_LABEL[risk]}** · ${args.prStats.files} file${args.prStats.files === 1 ? "" : "s"} changed, +${args.prStats.additions}/-${args.prStats.deletions}`,
     "",
-  ];
+  );
 
   if (args.posted.length > 0) {
     lines.push(`**Review order** (${args.posted.length} finding${args.posted.length === 1 ? "" : "s"} posted inline, highest severity first):`);
