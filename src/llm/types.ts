@@ -9,10 +9,13 @@ export type TaskKind =
   | "pass.tests"
   | "pass.performance"
   | "pass.style"
+  | "pass.walkthrough"
+  | "pass.test_gen"
   | "verify.cross_exam"
   | "verify.repro_gen"
   | "rulebook.compile"
-  | "chat.reply";
+  | "chat.reply"
+  | "chat.repo";
 
 export interface LlmMessage {
   role: "system" | "user";

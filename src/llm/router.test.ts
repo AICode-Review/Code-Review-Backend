@@ -153,3 +153,52 @@ describe("createLlmRouter JSON extraction robustness", () => {
     expect(callAnthropicMock).toHaveBeenCalledTimes(2); // first attempt + one repair retry
   });
 });
+
+describe("createLlmRouter — provider failure never crashes the caller", () => {
+  beforeEach(() => {
+    process.env["ANTHROPIC_API_KEY"] = "sk-ant";
+  });
+
+  it("returns a dropped (data: null, zero-cost) result instead of throwing when every retry of the first call fails", async () => {
+    callAnthropicMock.mockRejectedValue(new Error("ECONNRESET"));
+    const router = await freshRouter();
+    // The whole point: this must resolve, not reject — every caller (every pass, cross-exam,
+    // repro-gen, rulebook compile, chat reply, the PR walkthrough) treats data:null as
+    // "nothing usable, move on," but has no handling at all for complete() throwing.
+    const result = await router.complete({ task: "pass.security", messages: [], schema: SCHEMA, maxTokens: 100 });
+    expect(result.data).toBeNull();
+    expect(result.costUsd).toBe(0);
+    expect(result.inputTokens).toBe(0);
+    expect(result.raw).toContain("ECONNRESET");
+    expect(callAnthropicMock).toHaveBeenCalledTimes(3); // withRetry's own 3 attempts, then give up
+  });
+
+  it("still bills the first call's real cost when the first call succeeded (but failed validation) and only the repair retry hits a hard failure", async () => {
+    callAnthropicMock
+      .mockResolvedValueOnce({ text: "not json at all", inputTokens: 20, outputTokens: 8 })
+      .mockRejectedValue(new Error("rate limited"));
+    const router = await freshRouter();
+    const result = await router.complete({ task: "pass.security", messages: [], schema: SCHEMA, maxTokens: 100 });
+    expect(result.data).toBeNull();
+    expect(result.inputTokens).toBe(20);
+    expect(result.outputTokens).toBe(8);
+    expect(result.costUsd).toBeGreaterThan(0); // the first call really happened and really cost something
+    expect(result.raw).toContain("rate limited");
+  });
+
+  it("a hard provider failure on one Promise.all'd call never rejects the whole batch", async () => {
+    callAnthropicMock
+      .mockResolvedValueOnce({ text: '{"ok":true}', inputTokens: 10, outputTokens: 5 })
+      .mockRejectedValue(new Error("network down"));
+    const router = await freshRouter();
+    // Mirrors how jobs/reviewRun.ts runs the walkthrough alongside the specialist passes —
+    // one failing must never discard the other's already-successful result via Promise.all
+    // rejecting the whole batch.
+    const [ok, failed] = await Promise.all([
+      router.complete({ task: "pass.security", messages: [], schema: SCHEMA, maxTokens: 100 }),
+      router.complete({ task: "pass.logic", messages: [], schema: SCHEMA, maxTokens: 100 }),
+    ]);
+    expect(ok.data).toEqual({ ok: true });
+    expect(failed.data).toBeNull();
+  });
+});

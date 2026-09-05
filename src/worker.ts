@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import {
   getBoss,
   stopBoss,
@@ -16,18 +17,27 @@ import { handleIndexRepo } from "./jobs/indexRepo.js";
 import { verifyLicense } from "./license.js";
 import { captureError, initSentry } from "./observability/sentry.js";
 
-initSentry();
+/** DESIGN.md-style entrypoint guard (same pattern as benchmarks/src/dataset/mine.ts) — every
+ * side effect below (Sentry init, global process handlers, actually connecting to pg-boss,
+ * calling process.exit) is real-bootstrap-only. Importing this module from a test must be
+ * inert except for exposing `main` itself, so a test can call it directly against mocked
+ * dependencies without registering real signal handlers or touching a real queue connection. */
+export const isMainModule = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1] as string).href;
 
-process.on("uncaughtException", (err) => {
-  captureError(err);
-  console.error("[worker] uncaughtException:", err);
-});
-process.on("unhandledRejection", (err) => {
-  captureError(err);
-  console.error("[worker] unhandledRejection:", err);
-});
+if (isMainModule) {
+  initSentry();
 
-async function main() {
+  process.on("uncaughtException", (err) => {
+    captureError(err);
+    console.error("[worker] uncaughtException:", err);
+  });
+  process.on("unhandledRejection", (err) => {
+    captureError(err);
+    console.error("[worker] unhandledRejection:", err);
+  });
+}
+
+export async function main() {
   const license = verifyLicense();
   if (!license.valid) {
     console.error(`[worker] Self-hosted license check failed: ${license.error}`);
@@ -41,6 +51,21 @@ async function main() {
   // the same PR — can genuinely overlap. That overlap is exactly the
   // scenario the in-flight cancellation checks in reviewRun.ts exist for;
   // under strictly sequential processing that code would never fire.
+  //
+  // Each job's error is caught HERE, inside the map, and never re-thrown — pg-boss's
+  // onFetch (verified against the vendored source, manager.js's onFetch) calls the batch
+  // callback once with the whole fetched array and, on ANY rejection, marks EVERY job id in
+  // that batch as failed for retry — there is no per-job attribution with the array-callback
+  // form. Before this, one PR's transient failure (a network blip, anything not already
+  // absorbed by handleReviewRun's own internals) would make Promise.all reject and cause
+  // pg-boss to retry up to 4 OTHER unrelated jobs that had ALREADY posted their PR comments,
+  // sent their completion emails, and marked their own run "completed" — the retry would
+  // then re-run those already-shipped reviews from scratch, duplicating externally-visible
+  // side effects for orgs that had nothing to do with the original failure. handleReviewRun
+  // already records its own failure onto that specific run's DB row before re-throwing
+  // (see its own catch block) — that row is the authoritative failure record; pg-boss
+  // automatically retrying the whole batch was never the right recovery mechanism for it, and
+  // the product already has an explicit manual rerun endpoint for a genuinely failed review.
   await boss.work(JOBS.reviewRun, { batchSize: 5 }, async (jobs) => {
     await Promise.all(
       jobs.map(async (job) => {
@@ -53,7 +78,12 @@ async function main() {
         console.log(
           `[worker] ${JOBS.reviewRun} ${job.id} — ${pr.repo.owner}/${pr.repo.name}#${pr.number} (${parsed.data.reason})`,
         );
-        await handleReviewRun(parsed.data);
+        try {
+          await handleReviewRun(parsed.data);
+        } catch (err) {
+          captureError(err);
+          console.error(`[worker] ${JOBS.reviewRun} ${job.id} failed (already recorded on its own run row):`, err);
+        }
       }),
     );
   });
@@ -87,6 +117,10 @@ async function main() {
     await handleHealthSnapshotFanout();
   });
 
+  // Same isolation as JOBS.reviewRun above, and even more important here: handleChatReply
+  // has no per-job persisted failure/idempotency record at all, so a pg-boss-driven retry
+  // (which the un-caught version below would trigger for the ENTIRE batch on any one job's
+  // failure) could post a second, duplicate bot reply into a thread that already got one.
   await boss.work(JOBS.chatReply, { batchSize: 5 }, async (jobs) => {
     await Promise.all(
       jobs.map(async (job) => {
@@ -96,7 +130,12 @@ async function main() {
           return;
         }
         console.log(`[worker] ${JOBS.chatReply} ${job.id} — ${parsed.data.pr.repo.owner}/${parsed.data.pr.repo.name}#${parsed.data.pr.number}`);
-        await handleChatReply(parsed.data);
+        try {
+          await handleChatReply(parsed.data);
+        } catch (err) {
+          captureError(err);
+          console.error(`[worker] ${JOBS.chatReply} ${job.id} failed:`, err);
+        }
       }),
     );
   });
@@ -123,15 +162,17 @@ async function main() {
   console.log("[worker] ready — waiting for jobs");
 }
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, async () => {
-    await stopBoss();
-    process.exit(0);
+if (isMainModule) {
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, async () => {
+      await stopBoss();
+      process.exit(0);
+    });
+  }
+
+  main().catch((err) => {
+    captureError(err);
+    console.error("[worker] fatal:", err);
+    process.exit(1);
   });
 }
-
-main().catch((err) => {
-  captureError(err);
-  console.error("[worker] fatal:", err);
-  process.exit(1);
-});

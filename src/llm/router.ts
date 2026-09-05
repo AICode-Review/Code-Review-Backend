@@ -45,8 +45,11 @@ function modelFor(task: TaskKind): ModelChoice {
     case "pass.tests":
     case "pass.performance":
     case "pass.style":
+    case "pass.walkthrough":
+    case "pass.test_gen":
     case "rulebook.compile":
     case "chat.reply":
+    case "chat.repo":
     case "verify.repro_gen":
       return anthropicAvailable()
         ? { provider: "anthropic", model: env().MODEL_MID }
@@ -169,13 +172,41 @@ function tryParse<T>(schema: z.ZodType<T>, text: string): { ok: true; data: T } 
   }
 }
 
+/** A `data: null` result with no cost attached — the same "this call produced nothing usable"
+ * sentinel already used for a schema-validation failure, now also covering a provider call
+ * that never came back at all (every retry attempt failed: sustained outage, rate limit that
+ * didn't clear, network partition). Every caller (every specialist pass, cross-examine,
+ * repro-gen, rulebook compile, chat reply, the PR walkthrough) already treats `data: null` as
+ * "drop this, don't crash the run" — extending that same handling to a hard provider failure,
+ * instead of letting the exception propagate, is what actually makes that policy hold in
+ * practice. Before this, a sustained provider outage during ANY single call — including a
+ * Promise.all'd non-critical one like the walkthrough — would throw out of complete() and take
+ * an otherwise-fully-successful review run down with it. "The app should not break" starts here. */
+function droppedResult<T>(choice: ModelChoice, err: unknown, priorUsage?: { inputTokens: number; outputTokens: number; cost: number }): CompleteResult<T> {
+  return {
+    data: null,
+    inputTokens: priorUsage?.inputTokens ?? 0,
+    outputTokens: priorUsage?.outputTokens ?? 0,
+    costUsd: priorUsage?.cost ?? 0,
+    model: choice.model,
+    provider: choice.provider,
+    raw: err instanceof Error ? err.message : String(err),
+  };
+}
+
 /** Real LLM-backed router. All calls go through here so cost metering and zod validation are uniform across every pass, verification, and the rulebook compiler. */
 export function createLlmRouter(): LlmRouter {
   return {
     async complete<T>(req: CompleteRequest<T>): Promise<CompleteResult<T>> {
       const choice = modelFor(req.task);
 
-      const first = await withRetry(() => callProvider(choice, req.messages, req.maxTokens));
+      let first: ProviderResult;
+      try {
+        first = await withRetry(() => callProvider(choice, req.messages, req.maxTokens));
+      } catch (err) {
+        return droppedResult(choice, err);
+      }
+
       const firstParsed = tryParse(req.schema, first.text);
       if (firstParsed.ok) {
         return {
@@ -196,7 +227,19 @@ export function createLlmRouter(): LlmRouter {
           content: `Your previous response failed schema validation: ${firstParsed.error}\n\nRe-emit ONLY the corrected JSON — no prose, no markdown fences.\n\nPrevious response:\n${first.text}`,
         },
       ];
-      const second = await withRetry(() => callProvider(choice, repairMessages, req.maxTokens));
+      let second: ProviderResult;
+      try {
+        second = await withRetry(() => callProvider(choice, repairMessages, req.maxTokens));
+      } catch (err) {
+        // The repair attempt hit a hard failure — still bill/report what the FIRST call
+        // actually cost (it did complete, just failed validation) rather than losing that
+        // accounting, and drop the response the same as any other unparseable result.
+        return droppedResult(choice, err, {
+          inputTokens: first.inputTokens,
+          outputTokens: first.outputTokens,
+          cost: costUsd(choice.model, first.inputTokens, first.outputTokens, first),
+        });
+      }
       const secondParsed = tryParse(req.schema, second.text);
 
       const inputTokens = first.inputTokens + second.inputTokens;
