@@ -84,23 +84,30 @@ const EnvSchema = z.object({
 
   /**
    * Monthly review-usage quota (hard-block once exceeded — see repositories.ts
-   * getOrgUsage). Free is a flat org-wide allowance; Pro/Team scale per purchased
-   * seat. Self-hosted deployments (SELF_HOSTED=true) are never quota-limited —
-   * that org brings its own LLM keys/infra, so there's no shared cost to protect.
+   * getOrgUsage). Free is a flat org-wide allowance; Individual/Team scale per
+   * purchased seat. Self-hosted deployments (SELF_HOSTED=true) are never
+   * quota-limited — that org brings its own LLM keys/infra, so there's no shared
+   * cost to protect.
    *
    * Sized against RUN_COST_CAP_USD ($0.60/review worst case) and an estimated
    * ~$0.15/review *typical* cost (3 always-on frontier passes + up to 4 cached
    * mid-tier passes + cross-exam verification — no live benchmark run has been
    * performed yet, so this is an architecture-based estimate, not measured data;
-   * see /benchmark). Pro/Team target ~40% of seat revenue as LLM cost at that
-   * typical rate (~60% gross margin): $15/seat ÷ 0.4 ÷ $0.15 ≈ 40/seat/mo,
-   * $25/seat ÷ 0.4 ÷ $0.15 ≈ 65/seat/mo. Free has no revenue to protect margin
-   * against — its number is a bounded acquisition cost (worst case $15/mo per
-   * free org at the full $0.60 cap), not a margin calculation.
+   * see /benchmark). Individual/Team target ~40% of seat revenue as LLM cost at
+   * that typical rate (~60% gross margin): $19/seat ÷ 0.4 ÷ $0.15 ≈ 50/seat/mo,
+   * $35/seat ÷ 0.4 ÷ $0.15 ≈ 93/seat/mo (rounded down to 90, in the vendor's
+   * favor). Prices set 2026-09 against then-current competitor pricing
+   * (CodeRabbit $24/$48/$72, Greptile $30/seat, Qodo ~$1.67/review effective) —
+   * still meaningfully undercutting all three while carrying real margin. Free
+   * has no revenue to protect margin against — its number is a bounded
+   * acquisition cost (worst case $15/mo per free org at the full $0.60 cap),
+   * kept deliberately modest (well under half of Individual's 50/seat) so the
+   * paid jump stays a clear step up, not a rounding error, for a public-repos
+   * -only tier.
    */
   FREE_MONTHLY_REVIEW_QUOTA: z.coerce.number().int().positive().default(25),
-  PRO_MONTHLY_REVIEWS_PER_SEAT: z.coerce.number().int().positive().default(40),
-  TEAM_MONTHLY_REVIEWS_PER_SEAT: z.coerce.number().int().positive().default(65),
+  PRO_MONTHLY_REVIEWS_PER_SEAT: z.coerce.number().int().positive().default(50),
+  TEAM_MONTHLY_REVIEWS_PER_SEAT: z.coerce.number().int().positive().default(90),
   MODEL_FRONTIER: z.string().default("claude-sonnet-5"),
   MODEL_MID: z.string().default("claude-haiku-4-5"),
   MODEL_SKEPTIC: z.string().default("gpt-5"),

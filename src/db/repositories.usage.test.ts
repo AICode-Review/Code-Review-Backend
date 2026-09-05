@@ -161,7 +161,7 @@ describe("getOrgUsage", () => {
     );
     const usage = await getOrgUsage(client, "org-1");
     expect(usage.plan).toBe("pro");
-    expect(usage.quota).toBe(200); // 40/seat default * 5 seats
+    expect(usage.quota).toBe(250); // 50/seat default * 5 seats
   });
 
   it("scales the team quota by purchased seats", async () => {
@@ -176,7 +176,7 @@ describe("getOrgUsage", () => {
     );
     const usage = await getOrgUsage(client, "org-1");
     expect(usage.plan).toBe("team");
-    expect(usage.quota).toBe(650); // 65/seat default * 10 seats
+    expect(usage.quota).toBe(900); // 90/seat default * 10 seats
   });
 
   it("is always unlimited and never blocked when self-hosted", async () => {

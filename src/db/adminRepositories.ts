@@ -12,7 +12,7 @@ import { ACTIVE_SUBSCRIPTION_STATUSES, getOrgUsage, type OrgPlan, type OrgUsage 
  * double (testUtils/fakeSupabase.ts) actually supports.
  */
 
-const TIER_PRICE_USD: Record<string, number> = { pro: 15, team: 25 };
+const TIER_PRICE_USD: Record<string, number> = { pro: 19, team: 35 };
 
 function startOfMonthUtc(d = new Date()): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));

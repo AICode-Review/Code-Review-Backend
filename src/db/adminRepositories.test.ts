@@ -91,7 +91,7 @@ describe("getPlatformOverview", () => {
     expect(overview.totalOrgs).toBe(2);
     expect(overview.totalUsers).toBe(2);
     expect(overview.subscriptionsByTier).toEqual([{ tier: "pro", count: 1 }]);
-    expect(overview.mrrUsd).toBe(75); // $15/seat * 5 seats
+    expect(overview.mrrUsd).toBe(95); // $19/seat * 5 seats
     expect(overview.reviewsThisMonth).toBe(1); // only run-1 is this month
     expect(overview.llmSpendThisMonthUsd).toBeCloseTo(0.12);
     expect(overview.anthropicSpendThisMonthUsd).toBeCloseTo(0.1);
