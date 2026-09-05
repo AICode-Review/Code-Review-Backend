@@ -108,6 +108,101 @@ describe("verifyFinding", () => {
   });
 });
 
+describe("verifyFinding — cross-file context for contracts findings", () => {
+  function capturingRouter(capturedMessages: string[]): LlmRouter {
+    return {
+      async complete<T>(req: CompleteRequest<T>): Promise<CompleteResult<T>> {
+        capturedMessages.push(...req.messages.map((m) => m.content));
+        const parsed = req.schema.safeParse({ verdict: "upheld", reasoning: "Confirmed via the caller." });
+        return { data: parsed.success ? parsed.data : null, inputTokens: 10, outputTokens: 10, costUsd: 0.001, model: "fake-model", provider: "openai" };
+      },
+    };
+  }
+
+  const MULTI_FILES = new Map([
+    ["src/lib/discount.ts", "export function applyDiscount(price, pct, cap) {\n  return price;\n}\n"],
+    ["src/checkout/summary.ts", "import { applyDiscount } from '../lib/discount.js';\ncomputeTotal(price, pct) {\n  return applyDiscount(price, pct);\n}\n"],
+  ]);
+
+  it("shows the skeptic other files from this PR for a contracts finding, so a caller claim is actually checkable", async () => {
+    const capturedMessages: string[] = [];
+    const router = capturingRouter(capturedMessages);
+    await verifyFinding(
+      router,
+      candidate({
+        category: "contracts",
+        path: "src/lib/discount.ts",
+        explanation: "summary.ts calls applyDiscount with only 2 args",
+        evidence: ["export function applyDiscount(price, pct, cap) {"],
+      }),
+      MULTI_FILES,
+    );
+    expect(capturedMessages.some((m) => m.includes("for checking a claim about a caller/consumer elsewhere"))).toBe(true);
+    expect(capturedMessages.some((m) => m.includes("src/checkout/summary.ts"))).toBe(true);
+    expect(capturedMessages.some((m) => m.includes("computeTotal"))).toBe(true);
+  });
+
+  it("includes repo-index context text for a contracts finding when provided", async () => {
+    const capturedMessages: string[] = [];
+    const router = capturingRouter(capturedMessages);
+    const repoContextText = "## Repository index context (best-effort, may be stale — verify against the actual file before relying on it)\nLikely callers elsewhere in the repo:\n- computeTotal — src/checkout/summary.ts:3";
+    await verifyFinding(
+      router,
+      candidate({
+        category: "contracts",
+        path: "src/lib/discount.ts",
+        evidence: ["export function applyDiscount(price, pct, cap) {"],
+      }),
+      MULTI_FILES,
+      undefined,
+      undefined,
+      repoContextText,
+    );
+    expect(capturedMessages.some((m) => m.includes("Likely callers elsewhere in the repo"))).toBe(true);
+  });
+
+  it("does NOT show other files or repo-index context for a non-contracts finding — not worth the extra tokens", async () => {
+    const capturedMessages: string[] = [];
+    const router = capturingRouter(capturedMessages);
+    const repoContextText = "## Repository index context\nLikely callers elsewhere in the repo:\n- computeTotal — src/checkout/summary.ts:3";
+    await verifyFinding(
+      router,
+      candidate({
+        category: "logic",
+        path: "src/lib/discount.ts",
+        evidence: ["export function applyDiscount(price, pct, cap) {"],
+      }),
+      MULTI_FILES,
+      undefined,
+      undefined,
+      repoContextText,
+    );
+    // Both headings appear verbatim in the system prompt's own instructions (describing when
+    // they *might* show up for a contracts finding), so check for content that only exists in
+    // the dynamically-built sections themselves, not the static heading text.
+    expect(capturedMessages.some((m) => m.includes("src/checkout/summary.ts"))).toBe(false);
+    expect(capturedMessages.some((m) => m.includes("computeTotal"))).toBe(false);
+    expect(capturedMessages.some((m) => m.includes("Likely callers elsewhere in the repo"))).toBe(false);
+  });
+
+  it("also shows cross-file context for a tests finding — 'no test covers this' is a claim about a file it may not have been shown", async () => {
+    const capturedMessages: string[] = [];
+    const router = capturingRouter(capturedMessages);
+    await verifyFinding(
+      router,
+      candidate({
+        category: "tests",
+        path: "src/lib/discount.ts",
+        explanation: "No test exercises the new cap parameter",
+        evidence: ["export function applyDiscount(price, pct, cap) {"],
+      }),
+      MULTI_FILES,
+    );
+    expect(capturedMessages.some((m) => m.includes("for checking a claim about a caller/consumer elsewhere"))).toBe(true);
+    expect(capturedMessages.some((m) => m.includes("src/checkout/summary.ts"))).toBe(true);
+  });
+});
+
 describe("verifyFinding — sandbox execution (needsExecution)", () => {
   it("verifies via execution when the sandbox reproduces the defect, regardless of cross-exam", async () => {
     const router = createFakeRouter({
@@ -236,5 +331,73 @@ describe("verifyFinding — sandbox execution (needsExecution)", () => {
     const outcome = await verifyFinding(router, candidate({ needsExecution: false }), FILES, runSandbox);
     expect(called).toBe(false);
     expect(outcome.method).toBe("cross_exam");
+  });
+});
+
+describe("verifyFinding — executing the suggested fix, not just checking its syntax", () => {
+  it("marks fixVerified 'confirmed' when the same repro re-run with the fix applied passes", async () => {
+    const router = createFakeRouter({
+      "verify.cross_exam": { verdict: "refuted", reasoning: "n/a" },
+      "verify.repro_gen": { canGenerate: true, language: "node", testCode: "BUGGY", fixedTestCode: "FIXED" },
+    });
+    const runSandbox = async (_lang: unknown, testCode: string) =>
+      testCode === "FIXED" ? { available: true, reproduced: false, output: "" } : { available: true, reproduced: true, output: "AssertionError" };
+    const outcome = await verifyFinding(router, candidate({ needsExecution: true, suggestedFix: "return fixed;" }), FILES, runSandbox);
+    expect(outcome.status).toBe("verified");
+    expect(outcome.fixVerified).toBe("confirmed");
+    expect(outcome.verifiedHow).toContain("confirmed to resolve it");
+  });
+
+  it("marks fixVerified 'failed' when the same repro re-run with the fix applied still reproduces", async () => {
+    const router = createFakeRouter({
+      "verify.cross_exam": { verdict: "refuted", reasoning: "n/a" },
+      "verify.repro_gen": { canGenerate: true, language: "node", testCode: "BUGGY", fixedTestCode: "STILL_BUGGY" },
+    });
+    const runSandbox = async () => ({ available: true, reproduced: true, output: "AssertionError" });
+    const outcome = await verifyFinding(router, candidate({ needsExecution: true, suggestedFix: "return notActuallyFixed;" }), FILES, runSandbox);
+    expect(outcome.status).toBe("verified"); // the original defect is still confirmed real
+    expect(outcome.fixVerified).toBe("failed");
+    expect(outcome.verifiedHow).toContain("did NOT resolve it");
+  });
+
+  it("leaves fixVerified unset when repro-gen produced no fixedTestCode", async () => {
+    const router = createFakeRouter({
+      "verify.cross_exam": { verdict: "refuted", reasoning: "n/a" },
+      "verify.repro_gen": { canGenerate: true, language: "node", testCode: "BUGGY" },
+    });
+    const runSandbox = async () => ({ available: true, reproduced: true, output: "" });
+    const outcome = await verifyFinding(router, candidate({ needsExecution: true, suggestedFix: "return fixed;" }), FILES, runSandbox);
+    expect(outcome.fixVerified).toBeUndefined();
+    expect(outcome.verifiedHow).not.toContain("resolve it");
+  });
+
+  it("never attempts the fix check when the candidate has no suggestedFix, even if fixedTestCode is somehow present", async () => {
+    const router = createFakeRouter({
+      "verify.cross_exam": { verdict: "refuted", reasoning: "n/a" },
+      "verify.repro_gen": { canGenerate: true, language: "node", testCode: "BUGGY", fixedTestCode: "FIXED" },
+    });
+    let sandboxCalls = 0;
+    const runSandbox = async (_lang: unknown, testCode: string) => {
+      sandboxCalls++;
+      return testCode === "FIXED" ? { available: true, reproduced: false, output: "" } : { available: true, reproduced: true, output: "" };
+    };
+    const outcome = await verifyFinding(router, candidate({ needsExecution: true, suggestedFix: undefined }), FILES, runSandbox);
+    expect(sandboxCalls).toBe(1); // only the original repro ran, never the fix
+    expect(outcome.fixVerified).toBeUndefined();
+  });
+
+  it("never attempts the fix check when the original defect didn't reproduce", async () => {
+    const router = createFakeRouter({
+      "verify.cross_exam": { verdict: "upheld", reasoning: "Confirmed via file inspection." },
+      "verify.repro_gen": { canGenerate: true, language: "node", testCode: "BUGGY", fixedTestCode: "FIXED" },
+    });
+    let sandboxCalls = 0;
+    const runSandbox = async () => {
+      sandboxCalls++;
+      return { available: true, reproduced: false, output: "" };
+    };
+    const outcome = await verifyFinding(router, candidate({ needsExecution: true, suggestedFix: "return fixed;", confidence: 0.9 }), FILES, runSandbox);
+    expect(sandboxCalls).toBe(1); // the fix check never runs when there's nothing confirmed to fix
+    expect(outcome.fixVerified).toBeUndefined();
   });
 });

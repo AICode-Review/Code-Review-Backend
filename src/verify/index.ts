@@ -18,6 +18,13 @@ export interface VerifyOutcome {
   openaiCostUsd: number;
   inputTokens: number;
   outputTokens: number;
+  /** Only set when the finding's own defect was confirmed reproducing in the sandbox AND it
+   * has a suggestedFix AND repro-gen produced a fixedTestCode for it: "confirmed" means that
+   * same repro was re-run with the fix applied and it passed (the strongest possible signal a
+   * suggested fix actually works, not just that it's syntactically plausible); "failed" means
+   * it was re-run and the defect still reproduced. Omitted whenever the check wasn't attempted
+   * (no sandbox, no fix, no fixedTestCode) — that is NOT the same as "failed". */
+  fixVerified?: "confirmed" | "failed";
 }
 
 interface Usage {
@@ -62,6 +69,22 @@ function sumUsage(...parts: Usage[]): Usage {
  * rejected — an unconfirmed finding must never reach a PR, even at the cost
  * of occasionally dropping a real bug. When in doubt, say nothing.
  */
+/**
+ * For findings whose evidence is a deterministic pattern match rather than an LLM claim —
+ * e.g. engine/secretsScan.ts's vendor-token-format matches — cross-examination would add cost
+ * and a real risk the skeptic wrongly "refutes" a mechanical fact (the exact string IS present
+ * in the file; that's all a regex match ever claims), which would defeat the entire point of a
+ * guaranteed, judgment-free safety net sitting alongside the LLM passes. The static existence
+ * check alone is the right and sufficient verification here.
+ */
+export function verifyDeterministicFinding(candidate: Candidate, files: Map<string, string>): VerifyOutcome {
+  const staticResult = staticExistenceCheck(candidate, files);
+  const shared = { costUsd: 0, anthropicCostUsd: 0, openaiCostUsd: 0, inputTokens: 0, outputTokens: 0 } as const;
+  return staticResult.passed
+    ? { status: "verified", method: "static", verifiedHow: staticResult.reason, ...shared }
+    : { status: "rejected", method: "static", verifiedHow: staticResult.reason, ...shared };
+}
+
 export async function verifyFinding(
   router: LlmRouter,
   candidate: Candidate,
@@ -69,6 +92,12 @@ export async function verifyFinding(
   runSandbox: (language: NonNullable<ReturnType<typeof sandboxLanguageFor>>, testCode: string) => Promise<SandboxResult> = runInSandbox,
   /** This PR's diff text for candidate.path, when the caller has it — see crossExamine.ts's doc comment for why this matters. */
   diffText?: string,
+  /** Best-effort repo-index text (buildRepoContextBlock output) — see crossExamine.ts's doc
+   * comment. Only forwarded for `contracts` findings: that category's entire nature is
+   * cross-file impact, so the skeptic needs the same caller/definition visibility the pass
+   * had; other categories are file-local enough that the extra tokens on every verify call
+   * wouldn't be worth the cost. */
+  repoContextText?: string,
 ): Promise<VerifyOutcome> {
   const staticResult = staticExistenceCheck(candidate, files);
   if (!staticResult.passed) {
@@ -87,8 +116,14 @@ export async function verifyFinding(
   const fileContent = files.get(candidate.path) ?? "";
   const sandboxLang = candidate.needsExecution ? sandboxLanguageFor(candidate.path) : null;
 
+  // Cross-file visibility is only worth the extra tokens for categories whose claims are
+  // inherently about code elsewhere: contracts ("this breaks a caller elsewhere") and tests
+  // ("no test covers this" / "existing test elsewhere is now wrong") — the skeptic needs the
+  // same caller/definition/related-test evidence the pass had for either. Other categories are
+  // file-local enough that this would just add cost with no real verification benefit.
+  const isCrossFileClaim = candidate.category === "contracts" || candidate.category === "tests";
   const [crossExam, repro] = await Promise.all([
-    crossExamine(router, candidate, fileContent, diffText),
+    crossExamine(router, candidate, fileContent, diffText, isCrossFileClaim ? files : undefined, isCrossFileClaim ? repoContextText : undefined),
     sandboxLang ? generateRepro(router, candidate, fileContent) : Promise.resolve(null),
   ]);
 
@@ -106,12 +141,25 @@ export async function verifyFinding(
   let sandboxAttempted = false;
   let sandboxReproduced = false;
   let sandboxOutput = "";
+  let fixVerified: "confirmed" | "failed" | undefined;
   if (sandboxLang && repro?.data?.canGenerate && repro.data.testCode && !languageMismatch) {
     const sandbox = await runSandbox(sandboxLang, repro.data.testCode);
     if (sandbox.available) {
       sandboxAttempted = true;
       sandboxReproduced = sandbox.reproduced;
       sandboxOutput = sandbox.output;
+
+      // Only worth checking the suggested fix once the sandbox has actually confirmed the
+      // defect is real — with nothing confirmed reproducing, there's no repro to re-run the
+      // fix against. This is the one place a suggestedFix is ever actually EXECUTED, rather
+      // than only checked for placeholders/size/syntax (engine/suggestedFix.ts) — those catch
+      // an obviously bad suggestion, not one that's well-formed but doesn't actually work.
+      if (sandboxReproduced && candidate.suggestedFix && repro.data.fixedTestCode) {
+        const fixSandbox = await runSandbox(sandboxLang, repro.data.fixedTestCode);
+        if (fixSandbox.available) {
+          fixVerified = fixSandbox.reproduced ? "failed" : "confirmed";
+        }
+      }
     }
   }
 
@@ -136,11 +184,18 @@ export async function verifyFinding(
   );
 
   if (sandboxAttempted && sandboxReproduced) {
+    const fixNote =
+      fixVerified === "confirmed"
+        ? " The suggested fix was executed against the same repro and confirmed to resolve it."
+        : fixVerified === "failed"
+          ? " The suggested fix was executed against the same repro and did NOT resolve it — dropped."
+          : "";
     return {
       status: "verified",
       method: "execution",
-      verifiedHow: `Reproduced the described defect in an isolated sandbox run.${sandboxOutput ? ` Output: ${sandboxOutput.slice(0, 300)}` : ""}`,
+      verifiedHow: `Reproduced the described defect in an isolated sandbox run.${sandboxOutput ? ` Output: ${sandboxOutput.slice(0, 300)}` : ""}${fixNote}`,
       ...usage,
+      ...(fixVerified ? { fixVerified } : {}),
     };
   }
 

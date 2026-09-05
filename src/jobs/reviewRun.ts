@@ -22,14 +22,17 @@ import { emailConfigured, sendEmail } from "../email/smtp.js";
 import { reviewCompleteEmail } from "../email/templates.js";
 import { createLlmRouter } from "../llm/router.js";
 import type { LlmRouter } from "../llm/types.js";
-import { assembleContext } from "../engine/contextAssembly.js";
+import { assembleContext, buildRepoContextBlock } from "../engine/contextAssembly.js";
 import { diffTextForPath } from "../engine/diff.js";
 import { runAllPasses } from "../engine/passRunner.js";
 import { mergeAndScore, suppressPreviouslyDismissed, type PassCandidates, type RulebookBoost } from "../engine/merge.js";
 import { matchesIgnoredPath } from "../engine/ignorePaths.js";
 import { extractCodeSnippet } from "../engine/snippet.js";
 import { validateSuggestedFix, validateSuggestedFixSyntax } from "../engine/suggestedFix.js";
-import { verifyFinding } from "../verify/index.js";
+import { verifyDeterministicFinding, verifyFinding } from "../verify/index.js";
+import { scanForSecrets, SECRETS_SCAN_PASS } from "../engine/secretsScan.js";
+import { scanDependencies, DEPENDENCY_SCAN_PASS } from "../engine/dependencyScan.js";
+import { generateWalkthrough } from "../engine/prWalkthrough.js";
 import {
   buildLineCommentBody,
   buildSummaryMarkdown,
@@ -222,24 +225,43 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
     await throwIfCancelled(db, runId);
 
     const costCap = env().RUN_COST_CAP_USD;
-    const {
-      results,
-      totalCostUsd: passCostUsd,
-      anthropicCostUsd: passAnthropicCostUsd,
-      openaiCostUsd: passOpenaiCostUsd,
-      skippedPasses,
-    } = await runAllPasses(router, ctx, {
-      rulebook: rulebookRules,
-      costCapUsd: costCap,
-    });
+    const [
+      {
+        results,
+        totalCostUsd: passesCostUsd,
+        anthropicCostUsd: passesAnthropicCostUsd,
+        openaiCostUsd: passesOpenaiCostUsd,
+        skippedPasses,
+      },
+      walkthrough,
+    ] = await Promise.all([
+      runAllPasses(router, ctx, { rulebook: rulebookRules, costCapUsd: costCap }),
+      generateWalkthrough(router, ctx.prDiff),
+    ]);
+    // The walkthrough is a bonus orientation, not a specialist pass — it doesn't compete for
+    // the pass budget above, but its (typically small) cost still counts toward the run's
+    // total spend and per-provider tracking, same as everything else.
+    const passCostUsd = passesCostUsd + walkthrough.costUsd;
+    const passAnthropicCostUsd = passesAnthropicCostUsd + walkthrough.anthropicCostUsd;
+    const passOpenaiCostUsd = passesOpenaiCostUsd + walkthrough.openaiCostUsd;
 
     const candidatesByPass: PassCandidates[] = results.map((r) => ({ pass: r.pass, candidates: r.candidates }));
+    // Deterministic scans (engine/secretsScan.ts, engine/dependencyScan.ts) — run regardless of
+    // the cost cap and every LLM pass's own output, since neither costs an LLM call and neither
+    // should depend on an LLM happening to notice. Findings from either "pass" skip
+    // cross-examination in the verify loop below (verifyDeterministicFinding) rather than
+    // risking a skeptic wrongly refuting a mechanical, database/regex-backed match. A
+    // dependency-scan failure (OSV.dev unreachable) degrades to zero findings, same as the
+    // repo index timing out — it never fails the run.
+    candidatesByPass.push({ pass: SECRETS_SCAN_PASS, candidates: scanForSecrets(ctx.prDiff) });
+    candidatesByPass.push({ pass: DEPENDENCY_SCAN_PASS, candidates: await scanDependencies(ctx.prDiff) });
     const rulebookBoost = buildRulebookBoost(rulebookRules);
     const merged = suppressPreviouslyDismissed(mergeAndScore(candidatesByPass, rulebookBoost), priorFeedback);
 
     await throwIfCancelled(db, runId);
 
     const filesByPath = new Map(ctx.files.map((f) => [f.path, f.content]));
+    const repoContextText = buildRepoContextBlock(ctx.repoContext) ?? undefined;
     const deliverable: DeliverableFinding[] = [];
     let verifyCostUsd = 0;
     let verifyAnthropicCostUsd = 0;
@@ -251,11 +273,28 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
     const sandboxOverride = orgPlan === "free" ? disabledSandbox : undefined;
 
     for (const m of merged) {
+      // A deterministic-scan-only finding never touched the LLM to produce, so it doesn't need
+      // the cost cap guard either — checked first, before the cap check below would otherwise
+      // silently drop a real leaked credential or vulnerable dependency purely because other
+      // LLM passes used up the run's budget first.
+      if (m.passes.includes(SECRETS_SCAN_PASS) || m.passes.includes(DEPENDENCY_SCAN_PASS)) {
+        const outcome = verifyDeterministicFinding(m, filesByPath);
+        const sourceContent = filesByPath.get(m.path);
+        deliverable.push({
+          ...m,
+          verificationStatus: outcome.status,
+          verificationMethod: outcome.method,
+          verifiedHow: outcome.verifiedHow,
+          codeSnippet: env().ZERO_RETENTION ? null : sourceContent ? extractCodeSnippet(sourceContent, m.startLine, m.endLine) : null,
+        });
+        continue;
+      }
+
       if (passCostUsd + verifyCostUsd >= costCap) {
         // Cost cap reached — remaining candidates are dropped from this run entirely (never posted unverified).
         continue;
       }
-      const outcome = await verifyFinding(router, m, filesByPath, sandboxOverride, diffTextForPath(ctx.prDiff, m.path) ?? undefined);
+      const outcome = await verifyFinding(router, m, filesByPath, sandboxOverride, diffTextForPath(ctx.prDiff, m.path) ?? undefined, repoContextText);
       verifyCostUsd += outcome.costUsd;
       verifyAnthropicCostUsd += outcome.anthropicCostUsd;
       verifyOpenaiCostUsd += outcome.openaiCostUsd;
@@ -282,6 +321,15 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
             suggestedFix = undefined;
           }
         }
+      }
+      // Strongest possible check, when it ran: verify/index.ts actually re-executed the same
+      // sandbox repro with this fix applied. "failed" here outranks the format/syntax checks
+      // above (both of which can pass on a fix that's well-formed but simply doesn't work) —
+      // it means we have direct proof, not an inference, that the suggestion doesn't resolve
+      // the defect it's attached to.
+      if (suggestedFix && outcome.fixVerified === "failed") {
+        console.warn(`[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — executed against the sandbox repro and did not resolve it`);
+        suggestedFix = undefined;
       }
 
       deliverable.push({
@@ -312,6 +360,7 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       rejected,
       skippedPasses,
       costUsd: totalCostUsd,
+      walkthrough: walkthrough.data?.summary,
     });
     const firstComment = existingComments[0];
     if (firstComment) {

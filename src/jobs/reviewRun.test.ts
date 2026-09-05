@@ -4,6 +4,7 @@ import { createFakeRouter } from "../llm/fakeRouter.js";
 import { createFakeSupabase } from "../testUtils/fakeSupabase.js";
 import { upsertPrChain } from "../db/repositories.js";
 import * as verifyIndex from "../verify/index.js";
+import { scanDependencies } from "../engine/dependencyScan.js";
 import type { ReviewRunJob } from "../queue/index.js";
 import { handleReviewRun } from "./reviewRun.js";
 
@@ -12,6 +13,15 @@ import { handleReviewRun } from "./reviewRun.js";
 // loaded via config.ts's `import "dotenv/config"`. Keep these orchestrator tests offline.
 vi.mock("../indexer/embeddings.js", () => ({
   embedTexts: vi.fn(async () => ({ vectors: [], costUsd: 0 })),
+}));
+
+// Real scanDependencies() would hit the live osv.dev API — default every test to "no
+// vulnerabilities found" (the real, correct answer for every fixture diff below, none of
+// which touch a manifest file) and let one dedicated test below override this per-call to
+// prove the wiring, without any test depending on real network access.
+vi.mock("../engine/dependencyScan.js", () => ({
+  scanDependencies: vi.fn(async () => []),
+  DEPENDENCY_SCAN_PASS: "dependency-scan",
 }));
 
 
@@ -94,6 +104,61 @@ function job(): ReviewRunJob {
 }
 
 describe("handleReviewRun (orchestrator)", () => {
+  it("includes the AI-generated walkthrough in the posted summary comment", async () => {
+    const { client: db } = createFakeSupabase();
+    const router = createFakeRouter({
+      "pass.walkthrough": { summary: "Reads the authorization header directly without validating it." },
+    });
+    let summaryBody = "";
+    const adapter: PlatformAdapter = {
+      getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+      getDiff: async () => DIFF_TEXT,
+      getFile: async () => NEW_FILE,
+      listOwnComments: async () => [],
+      updateComment: async () => {
+        throw new Error("should not update — no existing comment");
+      },
+      postSummary: async (_pr: unknown, body: string) => {
+        summaryBody = body;
+        return "comment-1";
+      },
+      postLineComment: async () => "comment-2",
+      setStatus: async () => {},
+    } as unknown as PlatformAdapter;
+
+    await handleReviewRun(job(), { db, adapter, router });
+
+    expect(summaryBody).toContain("Reads the authorization header directly without validating it.");
+    // Appears before the risk line, matching delivery.ts's ordering.
+    expect(summaryBody.indexOf("Reads the authorization header")).toBeLessThan(summaryBody.indexOf("Risk:"));
+  });
+
+  it("omits the walkthrough section when the model's response fails schema validation, without failing the run", async () => {
+    const { client: db, tables } = createFakeSupabase();
+    const router = createFakeRouter({}); // no pass.walkthrough configured — fails validation, data: null
+    let summaryBody = "";
+    const adapter: PlatformAdapter = {
+      getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+      getDiff: async () => DIFF_TEXT,
+      getFile: async () => NEW_FILE,
+      listOwnComments: async () => [],
+      updateComment: async () => {
+        throw new Error("should not update — no existing comment");
+      },
+      postSummary: async (_pr: unknown, body: string) => {
+        summaryBody = body;
+        return "comment-1";
+      },
+      postLineComment: async () => "comment-2",
+      setStatus: async () => {},
+    } as unknown as PlatformAdapter;
+
+    await handleReviewRun(job(), { db, adapter, router });
+
+    expect(tables["review_runs"]?.[0]?.["status"]).toBe("completed");
+    expect(summaryBody).toMatch(/### 🤖 AI Review\n\n\*\*Risk:/);
+  });
+
   it("runs the full pipeline for a public repo: passes -> verify -> deliver -> completed run row", async () => {
     const { client: db, tables } = createFakeSupabase();
     const router = createFakeRouter({
@@ -234,6 +299,120 @@ describe("handleReviewRun (orchestrator)", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0]?.["verification_status"]).toBe("verified");
     expect(findings[0]?.["suggested_fix"]).toBeNull(); // but the bad "fix" never reaches a developer
+  });
+
+  it("catches a hardcoded secret via the deterministic scan even when no LLM pass flags it", async () => {
+    const secretDiff = `diff --git a/src/config.ts b/src/config.ts
+index 111..222 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -1,1 +1,2 @@
+ export const region = "us-east-1";
++export const awsKey = "AKIAABCDEFGHIJKLMNOP";
+`;
+    const secretFile = 'export const region = "us-east-1";\nexport const awsKey = "AKIAABCDEFGHIJKLMNOP";\n';
+
+    const { client: db, tables } = createFakeSupabase();
+    // No pass configured to return anything (every LLM pass yields zero candidates) — proves
+    // this finding comes purely from engine/secretsScan.ts, not from the LLM noticing it.
+    const router = createFakeRouter({});
+    const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
+    const adapter: PlatformAdapter = {
+      getPrInfo: async () => ({ headSha: "head-sha", title: "Add region config", author: "octocat", baseSha: "base-sha" }),
+      getDiff: async () => secretDiff,
+      getFile: async () => secretFile,
+      listOwnComments: async () => [],
+      updateComment: async () => {
+        throw new Error("should not update — no existing comment");
+      },
+      postSummary: async () => {
+        calls.postSummary++;
+        return "comment-1";
+      },
+      postLineComment: async () => {
+        calls.postLineComment++;
+        return "comment-2";
+      },
+      setStatus: async () => {
+        calls.setStatus++;
+      },
+    } as unknown as PlatformAdapter;
+
+    await handleReviewRun(job(), { db, adapter, router });
+
+    expect(calls.postLineComment).toBe(1);
+    const findings = tables["findings"] ?? [];
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.["verification_status"]).toBe("verified");
+    expect(findings[0]?.["verification_method"]).toBe("static");
+    expect(findings[0]?.["posted"]).toBe(true);
+    expect(findings[0]?.["category"]).toBe("security");
+  });
+
+  it("catches a vulnerable dependency bump via the OSV scan even when no LLM pass flags it", async () => {
+    const depDiff = `diff --git a/package.json b/package.json
+index 111..222 100644
+--- a/package.json
++++ b/package.json
+@@ -1,1 +1,2 @@
+ { "name": "widgets",
++  "lodash": "4.17.20",
+`;
+    const depFile = '{ "name": "widgets",\n  "lodash": "4.17.20",\n}\n';
+
+    vi.mocked(scanDependencies).mockResolvedValueOnce([
+      {
+        category: "security",
+        path: "package.json",
+        startLine: 2,
+        endLine: 2,
+        title: 'lodash@4.17.20 has a published vulnerability (GHSA-test-1234)',
+        explanation: "npm package \"lodash\" is being pinned to a version OSV.dev lists as vulnerable.",
+        whyItMatters: "Shipping this version means the vulnerability is present the moment this PR merges.",
+        impact: "Treat as exploitable until confirmed otherwise.",
+        fixSteps: ["Bump to a patched version."],
+        severity: "critical",
+        confidence: 0.9,
+        needsExecution: false,
+        evidence: ['"lodash": "4.17.20",'],
+      },
+    ]);
+
+    const { client: db, tables } = createFakeSupabase();
+    // No pass configured to return anything — proves this finding comes purely from
+    // engine/dependencyScan.ts (mocked above), not from any LLM pass noticing it.
+    const router = createFakeRouter({});
+    const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
+    const adapter: PlatformAdapter = {
+      getPrInfo: async () => ({ headSha: "head-sha", title: "Bump lodash", author: "octocat", baseSha: "base-sha" }),
+      getDiff: async () => depDiff,
+      getFile: async () => depFile,
+      listOwnComments: async () => [],
+      updateComment: async () => {
+        throw new Error("should not update — no existing comment");
+      },
+      postSummary: async () => {
+        calls.postSummary++;
+        return "comment-1";
+      },
+      postLineComment: async () => {
+        calls.postLineComment++;
+        return "comment-2";
+      },
+      setStatus: async () => {
+        calls.setStatus++;
+      },
+    } as unknown as PlatformAdapter;
+
+    await handleReviewRun(job(), { db, adapter, router });
+
+    expect(calls.postLineComment).toBe(1);
+    const findings = tables["findings"] ?? [];
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.["verification_status"]).toBe("verified");
+    expect(findings[0]?.["verification_method"]).toBe("static");
+    expect(findings[0]?.["posted"]).toBe(true);
+    expect(findings[0]?.["category"]).toBe("security");
   });
 
   it("emails the org owner a detailed review-complete summary once SMTP + FRONTEND_URL are configured", async () => {

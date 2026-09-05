@@ -29,14 +29,33 @@ export interface CrossExamCallResult {
  * been shown that escaping used to be there). Optional because not every caller has diff
  * context on hand (e.g. a candidate whose path fell outside the fetched diff for some reason)
  * — verification still runs, just back to file-content-only reasoning in that case.
+ *
+ * `otherFiles` and `repoContextText` close a matching blind spot for cross-file claims (most
+ * commonly `contracts` findings: "this breaks callers X and Y elsewhere"). Before this, the
+ * skeptic only ever saw `candidate.path` in isolation — it had no way to confirm OR refute a
+ * claim about a caller in a different file, so it had to default to "uncertain" even when the
+ * originating pass had real evidence, which the precision-first policy then rejects outright.
+ * `otherFiles` is other files from THIS review's own file set (real source, when the caller
+ * happens to be part of the PR); `repoContextText` is the same best-effort
+ * `buildRepoContextBlock` text the pass itself saw (symbol-level, when the caller lives
+ * elsewhere in the indexed repo). Both optional and additive — omitting them just returns to
+ * the original single-file behavior.
  */
 export async function crossExamine(
   router: LlmRouter,
   candidate: Candidate,
   fileContent: string,
   diffText?: string,
+  otherFiles?: Map<string, string>,
+  repoContextText?: string,
 ): Promise<CrossExamCallResult> {
   const system = await loadPrompt();
+  const otherFileBlocks =
+    otherFiles && otherFiles.size > 0
+      ? [...otherFiles.entries()]
+          .filter(([path]) => path !== candidate.path)
+          .map(([path, content]) => `### FILE: ${path}\n\`\`\`\n${content}\n\`\`\``)
+      : [];
   const user = [
     "## Finding",
     `Category: ${candidate.category}`,
@@ -54,6 +73,10 @@ export async function crossExamine(
     "```",
     fileContent,
     "```",
+    ...(otherFileBlocks.length > 0
+      ? ["", "## Other files from this PR (for checking a claim about a caller/consumer elsewhere)", ...otherFileBlocks]
+      : []),
+    ...(repoContextText ? ["", repoContextText] : []),
   ].join("\n");
 
   const result = await router.complete({

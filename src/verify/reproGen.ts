@@ -32,6 +32,9 @@ export async function generateRepro(router: LlmRouter, candidate: Candidate, fil
     "Evidence:",
     ...candidate.evidence.map((e) => `- ${e}`),
     "",
+    ...(candidate.suggestedFix
+      ? ["## Suggested fix (produce fixedTestCode by applying this to the inlined code)", "```", candidate.suggestedFix, "```", ""]
+      : []),
     `## File: ${candidate.path}`,
     "```",
     fileContent,

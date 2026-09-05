@@ -43,6 +43,40 @@ export const RulebookCompileOutputSchema = z.object({
 });
 export type RulebookCompileOutput = z.infer<typeof RulebookCompileOutputSchema>;
 
+/**
+ * Plain-English "what does this PR do" orientation shown at the top of the summary comment
+ * (DESIGN.md §10's "plain-English walkthrough" gap vs. competitors like CodeRabbit) — a short
+ * narrative companion to the structured findings list, not a replacement for it. Generated
+ * once per run from the diff alone; never a substitute for actually reading the findings.
+ */
+export const PrWalkthroughOutputSchema = z.object({
+  summary: z.string().min(1).max(600),
+});
+export type PrWalkthroughOutput = z.infer<typeof PrWalkthroughOutputSchema>;
+
+/**
+ * Full-codebase chat ("ask a question about this repo, not just a specific finding") —
+ * engine/repoChat.ts. Deliberately just the prose answer: which files/lines it drew on are
+ * computed server-side from the actual retrieval results (indexer/context.ts's
+ * similarChunks), never trusted from the LLM's own self-report the way suggestedFix's source
+ * snippet is never LLM-retyped either.
+ */
+export const RepoChatOutputSchema = z.object({
+  answer: z.string().min(1).max(4000),
+});
+export type RepoChatOutput = z.infer<typeof RepoChatOutputSchema>;
+
+/**
+ * Auto-generated test file for a "tests"-category finding's missing coverage
+ * (engine/testGen.ts) — closes a competitive gap vs Qodo's test generation. Deliberately
+ * just the file content: the target PATH is computed deterministically server-side
+ * (engine/testGen.ts#conventionalTestPath), never left to the model.
+ */
+export const TestGenOutputSchema = z.object({
+  fileContent: z.string().min(1).max(20000),
+});
+export type TestGenOutput = z.infer<typeof TestGenOutputSchema>;
+
 /** §6.7 chat-with-reviewer reply. `concedes: true` means the bot agrees the finding was wrong/not applicable — the caller turns that into a learning event automatically. */
 export const ChatReplyOutputSchema = z.object({
   answer: z.string().min(1),
@@ -62,5 +96,12 @@ export const ReproGenOutputSchema = z.object({
   language: z.enum(["node", "python", "jvm"]).optional(),
   /** Self-contained test file content — must run standalone with no network/external deps beyond the language's stdlib. */
   testCode: z.string().optional(),
+  /** The SAME self-contained test as `testCode`, but with the finding's `suggestedFix` applied
+   * to the inlined code — must PASS (not reproduce the defect) if the fix genuinely resolves
+   * what `testCode` proves is broken. Only requested/produced when the candidate has a
+   * `suggestedFix`; omitted when the model can't confidently apply it within a self-contained
+   * test. See verify/index.ts's fixVerified — this is the one thing today that actually
+   * executes a suggested fix rather than only checking its syntax. */
+  fixedTestCode: z.string().optional(),
 });
 export type ReproGenOutput = z.infer<typeof ReproGenOutputSchema>;

@@ -98,3 +98,35 @@ export async function assembleContext(
 export function prDiffToPromptText(prDiff: PrDiff): string {
   return prDiff.files.map(diffFileToPromptText).join("\n\n");
 }
+
+/**
+ * Best-effort cross-file signal from the repo index (DESIGN.md §6.2 step 2) — never
+ * authoritative, so the block itself tells the reader to verify before relying on it
+ * rather than presenting these as established facts. Shared by passRunner.ts (so every
+ * specialist pass sees it) and verify/crossExamine.ts (so the skeptic checks a cross-file
+ * claim, e.g. a contracts finding about a broken caller, against the SAME evidence the
+ * pass had — without this, the skeptic only ever saw the finding's own file and had no
+ * way to confirm or refute a claim about code elsewhere in the repo).
+ */
+export function buildRepoContextBlock(repoContext: RepoContext | null): string | null {
+  if (!repoContext) return null;
+  const parts: string[] = [];
+  if (repoContext.definitions.length > 0) {
+    parts.push(
+      `Definitions elsewhere in the repo:\n${repoContext.definitions.map((d) => `- ${d.kind} ${d.name} — ${d.path}:${d.startLine}${d.signature ? ` — ${d.signature}` : ""}`).join("\n")}`,
+    );
+  }
+  if (repoContext.callers.length > 0) {
+    parts.push(`Likely callers elsewhere in the repo:\n${repoContext.callers.map((c) => `- ${c.name} — ${c.path}:${c.startLine}`).join("\n")}`);
+  }
+  if (repoContext.relatedTests.length > 0) {
+    parts.push(`Related tests:\n${repoContext.relatedTests.map((t) => `- ${t.name} — ${t.path}:${t.startLine}`).join("\n")}`);
+  }
+  if (repoContext.similarChunks.length > 0) {
+    parts.push(
+      `Similar code elsewhere in the repo:\n${repoContext.similarChunks.map((s) => `- ${s.path}:${s.startLine}-${s.endLine} (similarity ${s.similarity.toFixed(2)})`).join("\n")}`,
+    );
+  }
+  if (parts.length === 0) return null;
+  return `## Repository index context (best-effort, may be stale — verify against the actual file before relying on it)\n${parts.join("\n\n")}`;
+}

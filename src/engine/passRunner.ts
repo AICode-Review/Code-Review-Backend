@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LlmRouter, TaskKind } from "../llm/types.js";
 import { PassOutputSchema, type Candidate } from "./schemas.js";
-import { prDiffToPromptText, type ReviewContext } from "./contextAssembly.js";
+import { buildRepoContextBlock, prDiffToPromptText, type ReviewContext } from "./contextAssembly.js";
 
 const promptsDir = join(dirname(fileURLToPath(import.meta.url)), "prompts");
 
@@ -56,34 +56,6 @@ async function loadPrompt(pass: PassName): Promise<string> {
  * cache-read rate for this (often large) block instead of full input price
  * (DESIGN.md §8).
  */
-/**
- * Best-effort cross-file signal from the repo index (DESIGN.md §6.2 step 2)
- * — never authoritative, so the block itself tells the model to verify
- * before relying on it rather than presenting these as established facts.
- */
-function buildRepoContextBlock(ctx: ReviewContext): string | null {
-  const rc = ctx.repoContext;
-  if (!rc) return null;
-  const parts: string[] = [];
-  if (rc.definitions.length > 0) {
-    parts.push(
-      `Definitions elsewhere in the repo:\n${rc.definitions.map((d) => `- ${d.kind} ${d.name} — ${d.path}:${d.startLine}${d.signature ? ` — ${d.signature}` : ""}`).join("\n")}`,
-    );
-  }
-  if (rc.callers.length > 0) {
-    parts.push(`Likely callers elsewhere in the repo:\n${rc.callers.map((c) => `- ${c.name} — ${c.path}:${c.startLine}`).join("\n")}`);
-  }
-  if (rc.relatedTests.length > 0) {
-    parts.push(`Related tests:\n${rc.relatedTests.map((t) => `- ${t.name} — ${t.path}:${t.startLine}`).join("\n")}`);
-  }
-  if (rc.similarChunks.length > 0) {
-    parts.push(
-      `Similar code elsewhere in the repo:\n${rc.similarChunks.map((s) => `- ${s.path}:${s.startLine}-${s.endLine} (similarity ${s.similarity.toFixed(2)})`).join("\n")}`,
-    );
-  }
-  if (parts.length === 0) return null;
-  return `## Repository index context (best-effort, may be stale — verify against the actual file before relying on it)\n${parts.join("\n\n")}`;
-}
 
 function buildSharedContextBlock(ctx: ReviewContext): string {
   const diffSummary = ctx.prDiff.files
@@ -96,7 +68,7 @@ function buildSharedContextBlock(ctx: ReviewContext): string {
     .map((f) => `### FILE: ${f.path}${f.truncated ? " (truncated)" : ""}\n\`\`\`\n${f.content}\n\`\`\``)
     .join("\n\n");
 
-  const repoContextBlock = buildRepoContextBlock(ctx);
+  const repoContextBlock = buildRepoContextBlock(ctx.repoContext);
 
   return [
     `## Changed files\n${diffSummary}`,
