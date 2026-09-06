@@ -1,15 +1,15 @@
 {
-  "name": "codeferret-dev",
-  "url": "https://authoritative-unmonetary-maisha.ngrok-free.dev",
+  "name": "codeferret",
+  "url": "https://code-review-frontend-nu.vercel.app",
   "hook_attributes": {
-    "url": "https://authoritative-unmonetary-maisha.ngrok-free.dev/webhooks/github",
+    "url": "https://code-review-backend-jzb0.onrender.com/webhooks/github",
     "active": true
   },
-  "redirect_url": "https://authoritative-unmonetary-maisha.ngrok-free.dev/setup/github/callback",
   "public": false,
   "default_permissions": {
     "contents": "read",
     "pull_requests": "write",
+    "issues": "read",
     "checks": "write",
     "metadata": "read"
   },
