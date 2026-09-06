@@ -4,18 +4,32 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
 import { env } from "../config.js";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "migrations");
 
+/** Same guard pattern as worker.ts — importing this module (e.g. a test exercising
+ * isLocalDatabaseUrl) must be inert, never opening a real database connection. */
+export const isMainModule = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1] as string).href;
+
+/**
+ * Whether `connectionString` points at a database that doesn't need/support SSL — plain
+ * localhost, or "postgres", docker-compose.selfhosted.yml's bundled Postgres service
+ * hostname. That container has no SSL enabled, so requesting it anyway (the `ssl: {...}`
+ * branch below) made a fresh self-hosted install's very first `npm run db:migrate` fail to
+ * connect at all — a real bug, not just a theoretical one.
+ */
+export function isLocalDatabaseUrl(connectionString: string): boolean {
+  return /localhost|127\.0\.0\.1|(?:^|@)postgres(?::|\/)/.test(connectionString);
+}
+
 async function main() {
   const connectionString = env().DATABASE_URL;
-  const isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
   const client = new pg.Client({
     connectionString,
-    ssl: isLocal ? undefined : { rejectUnauthorized: false },
+    ssl: isLocalDatabaseUrl(connectionString) ? undefined : { rejectUnauthorized: false },
   });
   await client.connect();
   try {
@@ -46,7 +60,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (isMainModule) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

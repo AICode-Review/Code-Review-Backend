@@ -154,9 +154,9 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ subscriptions });
   });
 
-  app.get<{ Querystring: { before?: string; limit?: string } }>("/api/admin/runs", async (req, reply) => {
+  app.get<{ Querystring: { before?: string; limit?: string; since?: string } }>("/api/admin/runs", async (req, reply) => {
     const limit = req.query.limit ? Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50)) : undefined;
-    const runs = await listRunsAdmin(getDb(), { before: req.query.before, limit });
+    const runs = await listRunsAdmin(getDb(), { before: req.query.before, limit, since: req.query.since });
     return reply.send({ runs });
   });
 
