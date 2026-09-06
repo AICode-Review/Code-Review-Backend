@@ -141,12 +141,28 @@ describe("getOrgAdminDetail", () => {
 });
 
 describe("listUsersAdmin", () => {
-  it("attaches each user's org memberships with role and org name", async () => {
+  it("attaches each user's org memberships with role, org name, plan, and review-quota usage", async () => {
     const { client } = createFakeSupabase(structuredClone(BASE));
     const users = await listUsersAdmin(client);
     const owner = users.find((u) => u.id === "user-1")!;
-    expect(owner.orgs).toEqual([{ id: "org-pro", name: "Acme Pro", role: "owner" }]);
+    // org-pro: tier "pro" (50/seat * 5 seats = 250 quota), 1 completed run this month (run-1),
+    // run-2 excluded (failed with $0 cost, and dated last month regardless).
+    expect(owner.orgs).toEqual([
+      { id: "org-pro", name: "Acme Pro", role: "owner", plan: "pro", reviewsUsed: 1, reviewsAllotted: 250, reviewsRemaining: 249, quotaBlocked: false },
+    ]);
     expect(users.find((u) => u.id === "user-2")!.isPlatformAdmin).toBe(true);
+  });
+
+  it("computes usage once per distinct org, not once per membership", async () => {
+    const shared: FakeTables = structuredClone(BASE);
+    // A second user joining the SAME org-pro as a member — usage numbers must match exactly.
+    shared.org_members!.push({ org_id: "org-pro", user_id: "user-2", role: "member" });
+    const { client } = createFakeSupabase(shared);
+    const users = await listUsersAdmin(client);
+    const ownerOrg = users.find((u) => u.id === "user-1")!.orgs[0]!;
+    const memberOrg = users.find((u) => u.id === "user-2")!.orgs.find((o) => o.id === "org-pro")!;
+    expect(memberOrg.reviewsUsed).toBe(ownerOrg.reviewsUsed);
+    expect(memberOrg.reviewsAllotted).toBe(ownerOrg.reviewsAllotted);
   });
 });
 
@@ -171,6 +187,12 @@ describe("listRunsAdmin", () => {
   it("returns an empty list when there are no runs at all", async () => {
     const { client } = createFakeSupabase({ review_runs: [] });
     expect(await listRunsAdmin(client)).toEqual([]);
+  });
+
+  it("excludes runs older than `since` — console's Overview date-range picker", async () => {
+    const { client } = createFakeSupabase(structuredClone(BASE));
+    const runs = await listRunsAdmin(client, { since: isoDaysAgo(7) });
+    expect(runs.map((r) => r.id)).toEqual(["run-1"]);
   });
 });
 

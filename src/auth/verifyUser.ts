@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getDb } from "../db/client.js";
-import { env } from "../config.js";
+import { isBootstrapAdmin } from "./adminBootstrap.js";
 
 export interface AuthedUser {
   /** internal users.id, not the Supabase auth user id */
@@ -12,17 +12,6 @@ export interface AuthedUser {
   githubId: number | null;
   /** Platform admin console access — see ADMIN_BOOTSTRAP_EMAILS. */
   isPlatformAdmin: boolean;
-}
-
-/** Case-insensitive match against the comma-separated ADMIN_BOOTSTRAP_EMAILS allowlist. */
-function isBootstrapAdmin(email: string | null | undefined): boolean {
-  if (!email) return false;
-  const list = env().ADMIN_BOOTSTRAP_EMAILS;
-  if (!list) return false;
-  return list
-    .split(",")
-    .map((e) => e.trim().toLowerCase())
-    .includes(email.toLowerCase());
 }
 
 /**

@@ -275,6 +275,22 @@ export async function getOrgAdminDetail(db: SupabaseClient, orgId: string): Prom
   };
 }
 
+export interface AdminUserOrgMembership {
+  id: string;
+  name: string;
+  role: string;
+  /** The org's current plan and this month's review-quota usage — same numbers Settings'
+   * usage tracker and the sync API 402 draw from (getOrgUsage), surfaced here so a
+   * platform admin can see "which plan, how many reviews allotted/used/remaining" per
+   * user without opening each org individually. `quota`/`remaining` are null only for a
+   * self-hosted org (unlimited — see OrgUsage's own doc comment). */
+  plan: OrgPlan;
+  reviewsUsed: number;
+  reviewsAllotted: number | null;
+  reviewsRemaining: number | null;
+  quotaBlocked: boolean;
+}
+
 export interface AdminUserSummary {
   id: string;
   email: string | null;
@@ -282,7 +298,7 @@ export interface AdminUserSummary {
   seatActive: boolean;
   isPlatformAdmin: boolean;
   createdAt: string;
-  orgs: { id: string; name: string; role: string }[];
+  orgs: AdminUserOrgMembership[];
 }
 
 export async function listUsersAdmin(db: SupabaseClient): Promise<AdminUserSummary[]> {
@@ -292,10 +308,30 @@ export async function listUsersAdmin(db: SupabaseClient): Promise<AdminUserSumma
     db.from("orgs").select("id, name"),
   ]);
   const orgNameById = new Map(((orgRows ?? []) as { id: string; name: string }[]).map((o) => [o.id, o.name]));
-  const orgsByUser = new Map<string, { id: string; name: string; role: string }[]>();
-  for (const m of (memberRows ?? []) as { org_id: string; user_id: string; role: string }[]) {
+  const members = (memberRows ?? []) as { org_id: string; user_id: string; role: string }[];
+
+  // One getOrgUsage() call per DISTINCT org referenced (not per user-org pair) — several
+  // users commonly share the same org (a team), and usage is an org-level fact, not a
+  // per-membership one.
+  const distinctOrgIds = [...new Set(members.map((m) => m.org_id))];
+  const usageByOrgId = new Map(
+    await Promise.all(distinctOrgIds.map(async (orgId) => [orgId, await getOrgUsage(db, orgId)] as const)),
+  );
+
+  const orgsByUser = new Map<string, AdminUserOrgMembership[]>();
+  for (const m of members) {
+    const usage = usageByOrgId.get(m.org_id);
     const list = orgsByUser.get(m.user_id) ?? [];
-    list.push({ id: m.org_id, name: orgNameById.get(m.org_id) ?? "—", role: m.role });
+    list.push({
+      id: m.org_id,
+      name: orgNameById.get(m.org_id) ?? "—",
+      role: m.role,
+      plan: usage?.plan ?? "free",
+      reviewsUsed: usage?.used ?? 0,
+      reviewsAllotted: usage?.quota ?? null,
+      reviewsRemaining: usage?.remaining ?? null,
+      quotaBlocked: usage?.blocked ?? false,
+    });
     orgsByUser.set(m.user_id, list);
   }
 
@@ -351,11 +387,14 @@ export async function listSubscriptionsAdmin(db: SupabaseClient): Promise<AdminS
 export interface AdminPageOpts {
   before?: string;
   limit?: number;
+  /** Only rows with started_at >= since (ISO timestamp) — console's Overview date-range picker. */
+  since?: string;
 }
 
 export async function listRunsAdmin(db: SupabaseClient, opts: AdminPageOpts = {}): Promise<AdminRunSummary[]> {
   let query = db.from("review_runs").select(RUN_SELECT).order("started_at", { ascending: false }).limit(opts.limit ?? 50);
   if (opts.before) query = query.lt("started_at", opts.before);
+  if (opts.since) query = query.gte("started_at", opts.since);
   const { data: runRows } = await query;
   return attachRunContext(db, (runRows ?? []) as RunRow[]);
 }
