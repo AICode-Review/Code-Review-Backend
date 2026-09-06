@@ -910,6 +910,19 @@ export async function getOrgSeatLimit(db: SupabaseClient, orgId: string): Promis
   return Math.max(FREE_SEAT_LIMIT, data.seats as number);
 }
 
+/**
+ * How many seats to actually bill for — Razorpay subscriptions are created/updated with a
+ * `quantity` that must be told to it explicitly (it doesn't infer seat count from anything
+ * on our side); this is what checkout/change-plan pass. Mirrors the exact count Settings'
+ * "N of M seats in use" already shows the owner (routes/api.ts's GET /:id/members joins the
+ * same seat_active column), so what gets charged always matches what the owner sees.
+ */
+export async function countActiveSeats(db: SupabaseClient, orgId: string): Promise<number> {
+  const { data } = await db.from("org_members").select("users(seat_active)").eq("org_id", orgId);
+  const rows = (data ?? []) as unknown as { users: { seat_active: boolean } | null }[];
+  return Math.max(1, rows.filter((r) => r.users?.seat_active).length);
+}
+
 /** Whether a repo can be reviewed under the org's current plan — free plan is public-repos-only. */
 export async function canReviewRepo(db: SupabaseClient, orgId: string, repoIsPrivate: boolean): Promise<boolean> {
   if (!repoIsPrivate) return true;

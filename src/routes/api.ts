@@ -16,6 +16,7 @@ import {
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   connectBitbucketWorkspace,
+  countActiveSeats,
   formatUsageLimitMessage,
   getFindingApplyFixContext,
   getFindingOrgContext,
@@ -742,9 +743,14 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     const { default: Razorpay } = await import("razorpay");
     const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
 
+    // Razorpay bills exactly the `quantity` it's told, never inferred from anything on our
+    // side — omitting this (as this route previously did) meant every checkout silently
+    // charged for 1 seat regardless of actual team size.
+    const seats = await countActiveSeats(db, orgId);
     const subscription = await razorpay.subscriptions.create({
       plan_id: planId,
       total_count: RAZORPAY_TOTAL_MONTHLY_CYCLES,
+      quantity: seats,
       customer_notify: 1,
       notes: { org_id: orgId, tier: parsed.data.tier },
     });

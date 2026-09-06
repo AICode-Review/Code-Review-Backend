@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { countActiveSeats } from "../db/repositories.js";
 
 export type BillingTier = "pro" | "team";
 
@@ -45,8 +46,12 @@ export async function changeOrgSubscriptionPlan(db: SupabaseClient, orgId: strin
     return { ok: false, status: 400, error: "no active subscription to change — start checkout instead" };
   }
 
+  // Reconcile quantity too, not just plan_id — headcount may have changed since checkout
+  // (or since the last change-plan), and this is the one other place Razorpay is told what
+  // to actually charge for.
+  const seats = await countActiveSeats(db, orgId);
   const { default: Razorpay } = await import("razorpay");
   const razorpay = new Razorpay({ key_id: creds.keyId, key_secret: creds.keySecret });
-  await razorpay.subscriptions.update(sub.razorpay_sub_id as string, { plan_id: planId, schedule_change_at: "now" });
+  await razorpay.subscriptions.update(sub.razorpay_sub_id as string, { plan_id: planId, quantity: seats, schedule_change_at: "now" });
   return { ok: true, razorpaySubId: sub.razorpay_sub_id as string, planId };
 }
