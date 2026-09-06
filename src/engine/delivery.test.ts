@@ -169,6 +169,34 @@ describe("buildSummaryMarkdown", () => {
     // No stray blank walkthrough block — the risk line follows directly after the header.
     expect(md).toMatch(/### 🤖 AI Review\n\n\*\*Risk:/);
   });
+
+  it("includes the Mermaid diagram in a collapsed section when provided", () => {
+    const md = buildSummaryMarkdown({
+      prStats: { files: 1, additions: 5, deletions: 1 },
+      posted: [],
+      digest: [],
+      rejected: [],
+      skippedPasses: [],
+      costUsd: 0,
+      diagram: "flowchart TD\n  A[discount.ts] -->|modifies| B[applyDiscount()]",
+    });
+    expect(md).toContain("<summary>📊 Change diagram</summary>");
+    expect(md).toContain("```mermaid");
+    expect(md).toContain("A[discount.ts] -->|modifies| B[applyDiscount()]");
+  });
+
+  it("omits the diagram section entirely when generation didn't produce one", () => {
+    const md = buildSummaryMarkdown({
+      prStats: { files: 1, additions: 1, deletions: 0 },
+      posted: [],
+      digest: [],
+      rejected: [],
+      skippedPasses: [],
+      costUsd: 0,
+    });
+    expect(md).not.toContain("Change diagram");
+    expect(md).not.toContain("```mermaid");
+  });
 });
 
 describe("buildLineCommentBody", () => {

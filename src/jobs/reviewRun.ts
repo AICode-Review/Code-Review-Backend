@@ -33,6 +33,7 @@ import { verifyDeterministicFinding, verifyFinding } from "../verify/index.js";
 import { scanForSecrets, SECRETS_SCAN_PASS } from "../engine/secretsScan.js";
 import { scanDependencies, DEPENDENCY_SCAN_PASS } from "../engine/dependencyScan.js";
 import { generateWalkthrough } from "../engine/prWalkthrough.js";
+import { generateDiagram, type DiagramCallResult } from "../engine/prDiagram.js";
 import {
   buildLineCommentBody,
   buildSummaryMarkdown,
@@ -225,6 +226,11 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
     await throwIfCancelled(db, runId);
 
     const costCap = env().RUN_COST_CAP_USD;
+    // The PR-summary diagram (DESIGN.md §10) is GitHub-only: GitHub renders Mermaid natively
+    // in comment markdown, Bitbucket does not, so a Bitbucket PR never even pays for the
+    // generation call — not just "generated but not shown."
+    const wantsDiagram = pr.repo.platform === "github";
+    const NO_DIAGRAM: DiagramCallResult = { data: null, costUsd: 0, anthropicCostUsd: 0, openaiCostUsd: 0, inputTokens: 0, outputTokens: 0 };
     const [
       {
         results,
@@ -234,16 +240,18 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
         skippedPasses,
       },
       walkthrough,
+      diagram,
     ] = await Promise.all([
       runAllPasses(router, ctx, { rulebook: rulebookRules, costCapUsd: costCap }),
       generateWalkthrough(router, ctx.prDiff),
+      wantsDiagram ? generateDiagram(router, ctx.prDiff) : Promise.resolve(NO_DIAGRAM),
     ]);
-    // The walkthrough is a bonus orientation, not a specialist pass — it doesn't compete for
-    // the pass budget above, but its (typically small) cost still counts toward the run's
-    // total spend and per-provider tracking, same as everything else.
-    const passCostUsd = passesCostUsd + walkthrough.costUsd;
-    const passAnthropicCostUsd = passesAnthropicCostUsd + walkthrough.anthropicCostUsd;
-    const passOpenaiCostUsd = passesOpenaiCostUsd + walkthrough.openaiCostUsd;
+    // The walkthrough and diagram are bonus orientation, not specialist passes — neither
+    // competes for the pass budget above, but their (typically small) cost still counts
+    // toward the run's total spend and per-provider tracking, same as everything else.
+    const passCostUsd = passesCostUsd + walkthrough.costUsd + diagram.costUsd;
+    const passAnthropicCostUsd = passesAnthropicCostUsd + walkthrough.anthropicCostUsd + diagram.anthropicCostUsd;
+    const passOpenaiCostUsd = passesOpenaiCostUsd + walkthrough.openaiCostUsd + diagram.openaiCostUsd;
 
     const candidatesByPass: PassCandidates[] = results.map((r) => ({ pass: r.pass, candidates: r.candidates }));
     // Deterministic scans (engine/secretsScan.ts, engine/dependencyScan.ts) — run regardless of
@@ -361,6 +369,7 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       skippedPasses,
       costUsd: totalCostUsd,
       walkthrough: walkthrough.data?.summary,
+      diagram: diagram.data?.mermaid,
     });
     const firstComment = existingComments[0];
     if (firstComment) {

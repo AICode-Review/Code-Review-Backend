@@ -46,6 +46,7 @@ function modelFor(task: TaskKind): ModelChoice {
     case "pass.performance":
     case "pass.style":
     case "pass.walkthrough":
+    case "pass.diagram":
     case "pass.test_gen":
     case "rulebook.compile":
     case "chat.reply":

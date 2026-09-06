@@ -159,6 +159,65 @@ describe("handleReviewRun (orchestrator)", () => {
     expect(summaryBody).toMatch(/### 🤖 AI Review\n\n\*\*Risk:/);
   });
 
+  it("includes the AI-generated Mermaid diagram for a GitHub PR", async () => {
+    const { client: db } = createFakeSupabase();
+    const router = createFakeRouter({
+      "pass.diagram": { mermaid: "flowchart TD\n  A[auth.ts] -->|modifies| B[login()]" },
+    });
+    let summaryBody = "";
+    const adapter: PlatformAdapter = {
+      getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+      getDiff: async () => DIFF_TEXT,
+      getFile: async () => NEW_FILE,
+      listOwnComments: async () => [],
+      updateComment: async () => {
+        throw new Error("should not update — no existing comment");
+      },
+      postSummary: async (_pr: unknown, body: string) => {
+        summaryBody = body;
+        return "comment-1";
+      },
+      postLineComment: async () => "comment-2",
+      setStatus: async () => {},
+    } as unknown as PlatformAdapter;
+
+    await handleReviewRun(job(), { db, adapter, router });
+
+    expect(summaryBody).toContain("```mermaid");
+    expect(summaryBody).toContain("A[auth.ts] -->|modifies| B[login()]");
+  });
+
+  it("never generates or shows a diagram for a Bitbucket PR", async () => {
+    const { client: db } = createFakeSupabase();
+    // pass.diagram IS configured — if the diagram were (wrongly) generated for Bitbucket,
+    // this would prove it by appearing in the summary. It must not.
+    const router = createFakeRouter({
+      "pass.diagram": { mermaid: "flowchart TD\n  A[auth.ts] -->|modifies| B[login()]" },
+    });
+    let summaryBody = "";
+    const adapter: PlatformAdapter = {
+      getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+      getDiff: async () => DIFF_TEXT,
+      getFile: async () => NEW_FILE,
+      listOwnComments: async () => [],
+      updateComment: async () => {
+        throw new Error("should not update — no existing comment");
+      },
+      postSummary: async (_pr: unknown, body: string) => {
+        summaryBody = body;
+        return "comment-1";
+      },
+      postLineComment: async () => "comment-2",
+      setStatus: async () => {},
+    } as unknown as PlatformAdapter;
+
+    const bitbucketJob = { ...job(), pr: { ...job().pr, repo: { ...job().pr.repo, platform: "bitbucket" as const } } };
+    await handleReviewRun(bitbucketJob, { db, adapter, router });
+
+    expect(summaryBody).not.toContain("Change diagram");
+    expect(summaryBody).not.toContain("```mermaid");
+  });
+
   it("runs the full pipeline for a public repo: passes -> verify -> deliver -> completed run row", async () => {
     const { client: db, tables } = createFakeSupabase();
     const router = createFakeRouter({

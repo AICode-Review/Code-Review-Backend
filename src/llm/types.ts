@@ -10,6 +10,7 @@ export type TaskKind =
   | "pass.performance"
   | "pass.style"
   | "pass.walkthrough"
+  | "pass.diagram"
   | "pass.test_gen"
   | "verify.cross_exam"
   | "verify.repro_gen"

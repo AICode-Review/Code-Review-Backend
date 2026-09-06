@@ -55,6 +55,30 @@ export const PrWalkthroughOutputSchema = z.object({
 export type PrWalkthroughOutput = z.infer<typeof PrWalkthroughOutputSchema>;
 
 /**
+ * A small Mermaid flowchart summarizing the structural shape of a PR's diff (which
+ * files/functions changed and how they relate) — DESIGN.md §10's "PR summary diagram" gap
+ * vs. competitors like CodeRabbit. GitHub-only (engine/prDiagram.ts, jobs/reviewRun.ts):
+ * GitHub renders Mermaid natively in PR comment markdown, Bitbucket does not, so this is
+ * never generated (and never billed) for a Bitbucket-hosted PR. Validated beyond the base
+ * schema: must open with a `flowchart`/`graph` declaration (rejects anything that isn't
+ * actually a flowchart-shaped diagram) and must not contain a triple-backtick — the
+ * generated text is embedded directly inside a ```mermaid fence in the summary comment, and
+ * the diff this pass reads is PR-author-controlled text, so an un-escaped ``` would let a
+ * malicious diff break out of the fence and inject arbitrary content into the posted comment.
+ */
+export const PrDiagramOutputSchema = z.object({
+  mermaid: z
+    .string()
+    .min(1)
+    .max(4000)
+    .refine((s) => !s.includes("```"), { message: "mermaid output must not contain a triple-backtick fence" })
+    .refine((s) => /^\s*(flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/i.test(s), {
+      message: "mermaid output must open with a flowchart/graph declaration",
+    }),
+});
+export type PrDiagramOutput = z.infer<typeof PrDiagramOutputSchema>;
+
+/**
  * Full-codebase chat ("ask a question about this repo, not just a specific finding") —
  * engine/repoChat.ts. Deliberately just the prose answer: which files/lines it drew on are
  * computed server-side from the actual retrieval results (indexer/context.ts's

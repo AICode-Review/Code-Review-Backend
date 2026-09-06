@@ -90,6 +90,12 @@ export interface SummaryArgs {
    * — undefined when generation failed schema validation or wasn't attempted; the summary
    * comment reads fine without it, this is a bonus, not a load-bearing section. */
   walkthrough?: string;
+  /** Mermaid flowchart source (engine/prDiagram.ts, engine/schemas.ts's PrDiagramOutputSchema)
+   * — undefined when generation failed validation, wasn't attempted, or the platform isn't
+   * GitHub (jobs/reviewRun.ts only calls prDiagram for GitHub PRs, since GitHub is the only
+   * platform that renders Mermaid in comment markdown). Collapsed by default, same as the
+   * digest/rejected sections, so it doesn't dominate the comment above the actual findings. */
+  diagram?: string;
 }
 
 const RISK_LABEL: Record<RiskLevel, string> = { high: "🔴 high", medium: "🟡 medium", low: "🟢 low", none: "✅ none" };
@@ -101,6 +107,20 @@ export function buildSummaryMarkdown(args: SummaryArgs): string {
 
   if (args.walkthrough) {
     lines.push(args.walkthrough, "");
+  }
+
+  if (args.diagram) {
+    lines.push(
+      "<details>",
+      "<summary>📊 Change diagram</summary>",
+      "",
+      "```mermaid",
+      args.diagram,
+      "```",
+      "",
+      "</details>",
+      "",
+    );
   }
 
   lines.push(
