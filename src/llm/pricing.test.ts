@@ -4,17 +4,17 @@ import { costUsd } from "./pricing.js";
 describe("costUsd", () => {
   it("prices plain input/output tokens with no cache activity", () => {
     const cost = costUsd("claude-sonnet-5", 1_000_000, 1_000_000);
-    expect(cost).toBeCloseTo(3 + 15, 6);
+    expect(cost).toBeCloseTo(2 + 10, 6);
   });
 
   it("prices a cache write at a premium over base input", () => {
     const withCache = costUsd("claude-sonnet-5", 0, 0, { cacheCreationInputTokens: 1_000_000 });
-    expect(withCache).toBeCloseTo(3 * 1.25, 6);
+    expect(withCache).toBeCloseTo(2 * 1.25, 6);
   });
 
   it("prices a cache read at a steep discount vs base input", () => {
     const withCache = costUsd("claude-sonnet-5", 0, 0, { cacheReadInputTokens: 1_000_000 });
-    expect(withCache).toBeCloseTo(3 * 0.1, 6);
+    expect(withCache).toBeCloseTo(2 * 0.1, 6);
   });
 
   it("is a strict no-op when no cache fields are passed", () => {
