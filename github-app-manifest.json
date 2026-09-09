@@ -1,6 +1,6 @@
 {
   "name": "scrutinye",
-  "url": "https://code-review-frontend-nu.vercel.app",
+  "url": "https://scrutinye.dev",
   "hook_attributes": {
     "url": "https://code-review-backend-jzb0.onrender.com/webhooks/github",
     "active": true
