@@ -27,7 +27,10 @@ export function buildServer() {
   });
 
   app.register(cors, {
-    origin: env().NODE_ENV === "production" ? (process.env["CORS_ORIGIN"]?.split(",") ?? false) : true,
+    origin:
+      env().NODE_ENV === "production"
+        ? (process.env["CORS_ORIGIN"]?.split(",").map((o) => o.trim()) ?? false)
+        : true,
   });
 
   // Baseline abuse protection for every route. The GitHub webhook route
