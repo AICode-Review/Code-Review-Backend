@@ -107,7 +107,7 @@ describe("buildSummaryMarkdown", () => {
       skippedPasses: ["tests"],
       costUsd: 0.1234,
     });
-    expect(md).toContain("codeferret:summary");
+    expect(md).toContain("scrutinye:summary");
     expect(md).toContain("🔴 high");
     expect(md).toContain("+10/-2");
     expect(md).toContain("skipped tests (cost cap)");

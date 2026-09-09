@@ -124,7 +124,7 @@ describe("parseEvent", () => {
     expect(
       adapter.parseEvent({
         name: "issue_comment",
-        payload: { ...payload, comment: { ...payload.comment, user: { login: "codeferret[bot]" } } },
+        payload: { ...payload, comment: { ...payload.comment, user: { login: "scrutinye[bot]" } } },
       }),
     ).toBeNull();
   });
@@ -141,7 +141,7 @@ describe("parseEvent", () => {
     };
     const event = adapter.parseEvent({
       name: "issue_comment",
-      payload: { ...payload, comment: { ...payload.comment, body: "hey @codeferret, is this really a bug?" } },
+      payload: { ...payload, comment: { ...payload.comment, body: "hey @scrutinye, is this really a bug?" } },
     });
     expect(event).toMatchObject({ kind: "feedback", type: "reply", scope: "general", commentId: "314159" });
   });
@@ -186,7 +186,7 @@ describe("parseEvent", () => {
     expect(
       adapter.parseEvent({
         name: "pull_request_review_comment",
-        payload: { ...base, comment: { id: 2, body: "reply", user: { login: "codeferret[bot]" }, in_reply_to_id: 12345 } },
+        payload: { ...base, comment: { id: 2, body: "reply", user: { login: "scrutinye[bot]" }, in_reply_to_id: 12345 } },
       }),
     ).toBeNull();
   });

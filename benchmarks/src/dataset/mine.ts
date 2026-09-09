@@ -140,7 +140,7 @@ export function tallyBlameShas(porcelain: string): Map<string, number> {
 }
 
 async function cloneForMining(ownerRepo: string, depth: number): Promise<{ dir: string; cleanup: () => Promise<void> }> {
-  const dir = await mkdtemp(join(tmpdir(), "codeferret-mine-"));
+  const dir = await mkdtemp(join(tmpdir(), "scrutinye-mine-"));
   await execFileAsync("git", ["clone", `--depth=${depth}`, `https://github.com/${ownerRepo}.git`, dir]);
   return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) };
 }
@@ -228,7 +228,7 @@ async function resolveIntroducingCommit(
 async function findPrUrl(ownerRepo: string, sha: string): Promise<string | null> {
   try {
     const res = await fetch(`https://api.github.com/repos/${ownerRepo}/commits/${sha}/pulls`, {
-      headers: { Accept: "application/vnd.github.groot-preview+json", "User-Agent": "codeferret-benchmark-miner" },
+      headers: { Accept: "application/vnd.github.groot-preview+json", "User-Agent": "scrutinye-benchmark-miner" },
     });
     if (!res.ok) return null;
     const prs = (await res.json()) as Array<{ html_url?: string }>;

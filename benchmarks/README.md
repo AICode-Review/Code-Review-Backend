@@ -1,7 +1,7 @@
-# CodeFerret benchmark harness
+# Scrutinye benchmark harness
 
 Implements DESIGN.md §12 — the scoring machinery and a starting dataset for measuring
-CodeFerret's actual verified catch rate and false-positive rate against the differentiation
+Scrutinye's actual verified catch rate and false-positive rate against the differentiation
 targets in DESIGN.md §1:
 
 - Verified catch rate > 70%

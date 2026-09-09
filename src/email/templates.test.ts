@@ -7,13 +7,13 @@ describe("inviteEmail", () => {
       orgName: "Acme",
       inviterLabel: "priya-dev",
       role: "admin",
-      acceptUrl: "https://app.codeferret.dev/invite/tok123",
+      acceptUrl: "https://app.scrutinye.dev/invite/tok123",
     });
 
     expect(content.subject).toContain("priya-dev");
     expect(content.subject).toContain("Acme");
-    expect(content.text).toContain("https://app.codeferret.dev/invite/tok123");
-    expect(content.html).toContain("https://app.codeferret.dev/invite/tok123");
+    expect(content.text).toContain("https://app.scrutinye.dev/invite/tok123");
+    expect(content.html).toContain("https://app.scrutinye.dev/invite/tok123");
     expect(content.html).toContain("Acme");
     expect(content.html).toContain("admin");
   });
@@ -23,7 +23,7 @@ describe("inviteEmail", () => {
       orgName: "<script>alert(1)</script>",
       inviterLabel: "Bob & \"Alice\"",
       role: "member",
-      acceptUrl: "https://app.codeferret.dev/invite/tok123",
+      acceptUrl: "https://app.scrutinye.dev/invite/tok123",
     });
 
     expect(content.html).not.toContain("<script>alert(1)</script>");
@@ -45,7 +45,7 @@ describe("reviewCompleteEmail", () => {
         { severity: "major", title: "Unhandled promise rejection", path: "src/checkout.ts", line: 12 },
       ],
       digestCount: 3,
-      runUrl: "https://app.codeferret.dev/runs/run-1",
+      runUrl: "https://app.scrutinye.dev/runs/run-1",
       prUrl: "https://github.com/acme/payments-api/pull/214",
     });
 
@@ -56,7 +56,7 @@ describe("reviewCompleteEmail", () => {
       expect(text).toContain("src/auth/session.ts:43");
       expect(text).toContain("Unhandled promise rejection");
       expect(text).toContain("src/checkout.ts:12");
-      expect(text).toContain("https://app.codeferret.dev/runs/run-1");
+      expect(text).toContain("https://app.scrutinye.dev/runs/run-1");
       expect(text).toContain("https://github.com/acme/payments-api/pull/214");
     }
     expect(content.text).toMatch(/\+3 more/);
@@ -70,7 +70,7 @@ describe("reviewCompleteEmail", () => {
       riskLevel: "none",
       posted: [],
       digestCount: 0,
-      runUrl: "https://app.codeferret.dev/runs/run-2",
+      runUrl: "https://app.scrutinye.dev/runs/run-2",
       prUrl: "https://github.com/acme/web/pull/587",
     });
 

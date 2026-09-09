@@ -11,7 +11,7 @@ const DEFAULT_CONFIG = {
 /**
  * Writes .review.yml as JSON — valid YAML (JSON is a syntactic subset of YAML 1.2), so it
  * reads fine as a .yml file without pulling in a YAML parser dependency for a config this
- * small. Consumed locally by `codeferret review` today; DESIGN.md §6.1 also describes the
+ * small. Consumed locally by `scrutinye review` today; DESIGN.md §6.1 also describes the
  * PR bot honoring a repo-root .review.yml, which isn't wired up on the backend yet (repo
  * config currently lives in Supabase, editable from the web app) — this file is real and
  * used by the CLI regardless of that.

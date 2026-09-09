@@ -73,8 +73,8 @@ interface ExecFileError {
  * cross-exam-only verification instead of failing the whole run.
  */
 export async function runInSandbox(language: SandboxLanguage, testCode: string): Promise<SandboxResult> {
-  const dir = await mkdtemp(join(tmpdir(), "codeferret-sandbox-"));
-  const containerName = `codeferret-repro-${randomUUID()}`;
+  const dir = await mkdtemp(join(tmpdir(), "scrutinye-sandbox-"));
+  const containerName = `scrutinye-repro-${randomUUID()}`;
 
   try {
     await writeFile(join(dir, FILE_BY_LANGUAGE[language]), testCode, "utf8");

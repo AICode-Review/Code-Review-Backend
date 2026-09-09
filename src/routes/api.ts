@@ -926,7 +926,7 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(409).send({ error: "stale", message: plan.reason });
     }
 
-    const message = `Apply CodeFerret suggested fix: ${ctx.path}:${ctx.startLine}-${ctx.endLine}`;
+    const message = `Apply Scrutinye suggested fix: ${ctx.path}:${ctx.startLine}-${ctx.endLine}`;
     try {
       await adapter.applyFix(pr, { path: ctx.path, branch: headRef, newContent: plan.newContent, message });
     } catch (err) {

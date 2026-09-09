@@ -11,7 +11,7 @@ import type {
 } from "../types/domain.js";
 
 /** Embedded in our summary comment on every platform so re-runs update it in place instead of posting a duplicate. */
-export const SUMMARY_MARKER = "<!-- codeferret:summary -->";
+export const SUMMARY_MARKER = "<!-- scrutinye:summary -->";
 
 export interface ApplyFixParams {
   path: string;

@@ -68,7 +68,7 @@ const CommentEventSchema = z.object({
 });
 
 /** Matches an explicit @mention of the bot in a general PR conversation comment (not threaded under a specific finding). */
-const BOT_MENTION_RE = /\bcodeferret\b/i;
+const BOT_MENTION_RE = /\bscrutinye\b/i;
 
 function repoSlug(fullName: string): string {
   return fullName.split("/")[1] ?? fullName;
@@ -147,7 +147,7 @@ export class BitbucketAdapter implements PlatformAdapter {
       if (!ev.success) return null;
       const { comment, pullrequest: pr, repository } = ev.data;
       const author = comment.user?.nickname ?? comment.user?.display_name ?? "";
-      if (author.endsWith("[bot]") || author === "codeferret") return null; // never our own comments/replies
+      if (author.endsWith("[bot]") || author === "scrutinye") return null; // never our own comments/replies
 
       const ref: PrRef = { repo: repoRef(repository), number: pr.id };
       const body = comment.content.raw;
@@ -319,7 +319,7 @@ export class BitbucketAdapter implements PlatformAdapter {
     // Bitbucket has no "neutral" build state — map it to SUCCESSFUL (informational, never blocks).
     const stateByCheck = { pending: "INPROGRESS", success: "SUCCESSFUL", neutral: "SUCCESSFUL", failure: "FAILED" } as const;
     await this.request(pr.repo, "POST", `/repositories/${pr.repo.owner}/${pr.repo.name}/commit/${s.headSha}/statuses/build`, {
-      key: "codeferret-review",
+      key: "scrutinye-review",
       state: stateByCheck[s.state],
       name: s.title,
       description: s.summary.slice(0, 255), // Bitbucket caps description length

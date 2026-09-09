@@ -171,7 +171,7 @@ export function buildSummaryMarkdown(args: SummaryArgs): string {
   // self-contradicting the "N candidates rejected during verification" section above it).
   lines.push(
     "---",
-    `_CodeFerret · ${total} candidate finding${total === 1 ? "" : "s"} (${verifiedTotal} verified, ${args.rejected.length} rejected) · ~$${args.costUsd.toFixed(3)}${passNote}${staleNote}_`,
+    `_Scrutinye · ${total} candidate finding${total === 1 ? "" : "s"} (${verifiedTotal} verified, ${args.rejected.length} rejected) · ~$${args.costUsd.toFixed(3)}${passNote}${staleNote}_`,
   );
 
   return lines.join("\n");

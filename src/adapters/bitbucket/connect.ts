@@ -21,10 +21,10 @@ export interface ConnectDescriptorConfig {
 /** The app descriptor Bitbucket fetches at install time — DESIGN.md §4's "Connect app (atlassian-connect.json)". */
 export function buildAtlassianConnectDescriptor(cfg: ConnectDescriptorConfig): Record<string, unknown> {
   return {
-    key: "codeferret-bitbucket",
-    name: "CodeFerret",
+    key: "scrutinye-bitbucket",
+    name: "Scrutinye",
     description: "AI code review with verification before anything gets posted.",
-    vendor: { name: cfg.vendorName ?? "CodeFerret", url: cfg.vendorUrl ?? cfg.baseUrl },
+    vendor: { name: cfg.vendorName ?? "Scrutinye", url: cfg.vendorUrl ?? cfg.baseUrl },
     baseUrl: cfg.baseUrl,
     authentication: { type: "jwt" },
     lifecycle: {

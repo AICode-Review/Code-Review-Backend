@@ -93,7 +93,7 @@ const PushEventSchema = z.object({
 });
 
 /** Matches an explicit @mention of the bot in a general PR conversation comment (not threaded under a specific finding). */
-const BOT_MENTION_RE = /\bcodeferret\b/i;
+const BOT_MENTION_RE = /\bscrutinye\b/i;
 
 function repoRef(repo: z.infer<typeof RepositorySchema>, installationId?: number): RepoRef {
   return {

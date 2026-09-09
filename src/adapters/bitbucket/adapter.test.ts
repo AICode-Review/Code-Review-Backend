@@ -92,7 +92,7 @@ describe("parseEvent", () => {
     const event = adapter.parseEvent({
       name: "pullrequest:comment_created",
       payload: {
-        comment: { id: 7, content: { raw: "hey @codeferret is this right?" }, user: { nickname: "octocat" } },
+        comment: { id: 7, content: { raw: "hey @scrutinye is this right?" }, user: { nickname: "octocat" } },
         pullrequest: { id: 42 },
         repository: REPOSITORY,
       },
@@ -115,7 +115,7 @@ describe("parseEvent", () => {
       adapter.parseEvent({
         name: "pullrequest:comment_created",
         payload: {
-          comment: { id: 1, content: { raw: "some reply" }, user: { nickname: "codeferret" }, parent: { id: 55 } },
+          comment: { id: 1, content: { raw: "some reply" }, user: { nickname: "scrutinye" }, parent: { id: 55 } },
           pullrequest: { id: 42 },
           repository: REPOSITORY,
         },

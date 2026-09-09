@@ -39,8 +39,8 @@ const EnvSchema = z.object({
   SMTP_PASS: z.string().optional(),
   /** true = implicit TLS (typically port 465); false (default) = plain/STARTTLS (typically port 587) — matches how most providers (Gmail, Office365, SES, Mailgun SMTP) are configured out of the box. */
   SMTP_SECURE: boolEnv(false),
-  EMAIL_FROM: z.string().default("CodeFerret <onboarding@codeferret.dev>"),
-  /** Origin of the deployed web app, e.g. https://app.codeferret.dev — used only to build the /invite/:token and /runs/:id links inside emails. */
+  EMAIL_FROM: z.string().default("Scrutinye <onboarding@scrutinye.dev>"),
+  /** Origin of the deployed web app, e.g. https://app.scrutinye.dev — used only to build the /invite/:token and /runs/:id links inside emails. */
   FRONTEND_URL: z.string().url().optional(),
   /** Where the public "Contact us" form (POST /api/contact) notifies on a new submission. Every submission is always persisted to contact_submissions regardless — this only gates the best-effort email ping, same silent-degrade rule as SMTP everywhere else. */
   CONTACT_INBOX_EMAIL: z.string().optional(),

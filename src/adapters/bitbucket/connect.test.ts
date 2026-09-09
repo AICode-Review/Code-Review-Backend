@@ -5,7 +5,7 @@ import { buildAtlassianConnectDescriptor, computeQsh, verifyConnectJwt } from ".
 describe("buildAtlassianConnectDescriptor", () => {
   it("advertises jwt auth, the lifecycle URLs, and the pull-request webhook events", () => {
     const descriptor = buildAtlassianConnectDescriptor({ baseUrl: "https://api.example.com" });
-    expect(descriptor["key"]).toBe("codeferret-bitbucket");
+    expect(descriptor["key"]).toBe("scrutinye-bitbucket");
     expect(descriptor["baseUrl"]).toBe("https://api.example.com");
     expect((descriptor["authentication"] as { type: string }).type).toBe("jwt");
     expect((descriptor["lifecycle"] as { installed: string }).installed).toBe("/bitbucket/connect/installed");

@@ -7,7 +7,7 @@ import { writeReviewConfig } from "./configInit.js";
 let dir: string;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), "codeferret-cli-test-"));
+  dir = await mkdtemp(join(tmpdir(), "scrutinye-cli-test-"));
 });
 
 afterEach(async () => {

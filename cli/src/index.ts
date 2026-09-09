@@ -7,7 +7,7 @@ import { format, type OutputFormat } from "./formatters.js";
 import { writeReviewConfig } from "./configInit.js";
 
 const program = new Command();
-program.name("codeferret").description("Local + CI code review using the same multi-pass + verification engine as the CodeFerret PR bot.");
+program.name("scrutinye").description("Local + CI code review using the same multi-pass + verification engine as the Scrutinye PR bot.");
 
 program
   .command("review")
@@ -19,7 +19,7 @@ program
     const anthropicApiKey = process.env["ANTHROPIC_API_KEY"];
     const openaiApiKey = process.env["OPENAI_API_KEY"];
     if (!anthropicApiKey || !openaiApiKey) {
-      console.error("ANTHROPIC_API_KEY and OPENAI_API_KEY must both be set — the same two keys the CodeFerret backend uses.");
+      console.error("ANTHROPIC_API_KEY and OPENAI_API_KEY must both be set — the same two keys the Scrutinye backend uses.");
       process.exitCode = 1;
       return;
     }
@@ -39,9 +39,9 @@ program
     const router = createCliRouter({
       anthropicApiKey,
       openaiApiKey,
-      frontierModel: process.env["CODEFERRET_MODEL_FRONTIER"] ?? "claude-sonnet-5",
-      midModel: process.env["CODEFERRET_MODEL_MID"] ?? "claude-haiku-4-5",
-      skepticModel: process.env["CODEFERRET_MODEL_SKEPTIC"] ?? "gpt-5",
+      frontierModel: process.env["SCRUTINYE_MODEL_FRONTIER"] ?? "claude-sonnet-5",
+      midModel: process.env["SCRUTINYE_MODEL_MID"] ?? "claude-haiku-4-5",
+      skepticModel: process.env["SCRUTINYE_MODEL_SKEPTIC"] ?? "gpt-5",
     });
 
     const findings = await runLocalReview(router, local, { costCapUsd: Number(opts.costCap) });
@@ -60,18 +60,18 @@ config
     console.log(wrote ? `Wrote ${path}` : `${path} already exists — use --force to overwrite.`);
   });
 
-const auth = program.command("auth").description("Link the CLI to your CodeFerret org");
+const auth = program.command("auth").description("Link the CLI to your Scrutinye org");
 auth
   .command("login")
   .description("Not implemented yet — see notes below")
   .action(() => {
     console.log(
       [
-        "`codeferret auth login` isn't implemented yet: it needs an org-scoped API-key",
+        "`scrutinye auth login` isn't implemented yet: it needs an org-scoped API-key",
         "system on the backend (issue/verify/revoke a key, distinct from the web app's",
-        "Supabase session auth) that doesn't exist today. `codeferret review` doesn't need",
+        "Supabase session auth) that doesn't exist today. `scrutinye review` doesn't need",
         "it — it talks directly to Anthropic/OpenAI with your own API keys and never",
-        "touches your CodeFerret account. Rulebook/analytics sync via the CLI is blocked on",
+        "touches your Scrutinye account. Rulebook/analytics sync via the CLI is blocked on",
         "that backend feature landing first.",
       ].join("\n"),
     );

@@ -22,7 +22,7 @@ export interface ClonedRepo {
  * never leak that token.
  */
 export async function cloneShallow(cloneUrl: string): Promise<ClonedRepo> {
-  const dir = await mkdtemp(join(tmpdir(), "codeferret-index-"));
+  const dir = await mkdtemp(join(tmpdir(), "scrutinye-index-"));
   try {
     await execFileAsync("git", ["clone", "--depth", "1", "--single-branch", cloneUrl, dir]);
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: dir });

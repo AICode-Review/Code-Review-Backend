@@ -756,7 +756,7 @@ type BitbucketRepoListItem = {
   workspace?: { slug?: string };
 };
 
-/** Lists every repo in a Bitbucket workspace and upserts them under the CodeFerret org. */
+/** Lists every repo in a Bitbucket workspace and upserts them under the Scrutinye org. */
 async function syncBitbucketWorkspaceRepos(
   db: SupabaseClient,
   orgId: string,
@@ -999,7 +999,7 @@ export function formatUsageLimitMessage(usage: OrgUsage): string {
 /**
  * Monthly AI-review usage against the org's plan quota (DESIGN.md pricing — hard-block
  * once exceeded). Self-hosted deployments (SELF_HOSTED=true) are always unlimited: that
- * org brings its own LLM keys/infra, so there's no shared cost for CodeFerret to protect.
+ * org brings its own LLM keys/infra, so there's no shared cost for Scrutinye to protect.
  */
 export async function getOrgUsage(db: SupabaseClient, orgId: string): Promise<OrgUsage> {
   const [plan, seats] = await Promise.all([getOrgPlan(db, orgId), getOrgSeatLimit(db, orgId)]);

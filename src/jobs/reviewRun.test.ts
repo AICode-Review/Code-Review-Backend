@@ -478,7 +478,7 @@ index 111..222 100644
     process.env["SMTP_HOST"] = "smtp.example.com";
     process.env["SMTP_USER"] = "user@example.com";
     process.env["SMTP_PASS"] = "secret";
-    process.env["FRONTEND_URL"] = "https://app.codeferret.dev";
+    process.env["FRONTEND_URL"] = "https://app.scrutinye.dev";
     vi.resetModules(); // config.ts memoizes env() at module scope — force a fresh read for this test.
     sendMailMock.mockReset();
     createTransportMock.mockClear();
@@ -512,7 +512,7 @@ index 111..222 100644
       const sent = sendMailMock.mock.calls[0]![0] as { to: string; subject: string; html: string };
       expect(sent.to).toBe("owner@acme.dev");
       expect(sent.subject).toContain("widgets");
-      expect(sent.html).toContain("https://app.codeferret.dev/runs/");
+      expect(sent.html).toContain("https://app.scrutinye.dev/runs/");
     } finally {
       delete process.env["SMTP_HOST"];
       delete process.env["SMTP_USER"];

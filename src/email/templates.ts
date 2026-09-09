@@ -37,7 +37,7 @@ export function reviewCompleteEmail(args: ReviewCompleteEmailArgs): EmailContent
     (f) => `  - [${SEVERITY_LABEL[f.severity]}] ${f.title} (${f.path}:${f.line})`,
   );
   const text = [
-    `CodeFerret finished reviewing ${args.repoName} #${args.prNumber}: "${args.prTitle}"`,
+    `Scrutinye finished reviewing ${args.repoName} #${args.prNumber}: "${args.prTitle}"`,
     "",
     `Risk: ${RISK_LABEL[args.riskLevel]}`,
     "",
@@ -67,7 +67,7 @@ export function reviewCompleteEmail(args: ReviewCompleteEmailArgs): EmailContent
   const html = `
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #18181b;">
   <p style="font-size: 15px; line-height: 1.5;">
-    CodeFerret finished reviewing <strong>${escapeHtml(args.repoName)} #${args.prNumber}</strong>:
+    Scrutinye finished reviewing <strong>${escapeHtml(args.repoName)} #${args.prNumber}</strong>:
     "${escapeHtml(args.prTitle)}"
   </p>
   <p style="font-size: 14px; font-weight: 600; margin: 16px 0;">${escapeHtml(RISK_LABEL[args.riskLevel])}</p>
@@ -134,9 +134,9 @@ export function contactSubmissionEmail(args: ContactSubmissionEmailArgs): EmailC
 }
 
 export function inviteEmail(args: InviteEmailArgs): EmailContent {
-  const subject = `${args.inviterLabel} invited you to join ${args.orgName} on CodeFerret`;
+  const subject = `${args.inviterLabel} invited you to join ${args.orgName} on Scrutinye`;
   const text = [
-    `${args.inviterLabel} invited you to join ${args.orgName} on CodeFerret as ${args.role}.`,
+    `${args.inviterLabel} invited you to join ${args.orgName} on Scrutinye as ${args.role}.`,
     "",
     `Accept the invite: ${args.acceptUrl}`,
     "",
@@ -147,7 +147,7 @@ export function inviteEmail(args: InviteEmailArgs): EmailContent {
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; color: #18181b;">
   <p style="font-size: 15px; line-height: 1.5;">
     <strong>${escapeHtml(args.inviterLabel)}</strong> invited you to join
-    <strong>${escapeHtml(args.orgName)}</strong> on CodeFerret as <strong>${escapeHtml(args.role)}</strong>.
+    <strong>${escapeHtml(args.orgName)}</strong> on Scrutinye as <strong>${escapeHtml(args.role)}</strong>.
   </p>
   <p style="margin: 24px 0;">
     <a href="${args.acceptUrl}" style="background: #18181b; color: #ffffff; padding: 10px 18px; border-radius: 6px; text-decoration: none; font-size: 14px; display: inline-block;">
