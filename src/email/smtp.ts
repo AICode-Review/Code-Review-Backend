@@ -47,6 +47,14 @@ export async function sendEmail(message: EmailMessage): Promise<EmailSendResult>
       // smtp.gmail.com resolve to an IPv6 address first — forcing IPv4 avoids an
       // immediate ENETUNREACH instead of falling back.
       family: 4,
+      // nodemailer's defaults (2min connection, 30s greeting/socket) mean a blocked or
+      // slow path silently holds the caller's whole request open that long — every caller
+      // here awaits sendEmail() inline (POST /api/contact, invite emails, etc.), so a
+      // stalled SMTP path reads to the requester as a hung request, not a failed one.
+      // Failing fast keeps the "never blocks the caller" promise true in practice.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 10_000,
     };
     const transport = nodemailer.createTransport(options);
     await transport.sendMail({

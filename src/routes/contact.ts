@@ -40,7 +40,8 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
 
       const inbox = env().CONTACT_INBOX_EMAIL;
       if (inbox && emailConfigured()) {
-        await sendEmail({ to: inbox, ...contactSubmissionEmail({ name, email, message }) });
+        const result = await sendEmail({ to: inbox, ...contactSubmissionEmail({ name, email, message }) });
+        if (!result.sent) console.warn(`[contact] notification email to ${inbox} failed: ${result.error}`);
       }
 
       return reply.send({ ok: true });
