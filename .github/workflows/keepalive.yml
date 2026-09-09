@@ -1,0 +1,22 @@
+name: Keep backend warm
+
+# Render's hibernating tier spins the service down after ~15 minutes idle (confirmed via its
+# own internal container hostname, which literally contains "hibernate") - the first real
+# request after that can take 30-60+ seconds to wake it, which both the frontend and console
+# apps feel as "loading is slow." Pinging the public health endpoint often enough that it
+# never goes fully idle sidesteps that without needing a paid always-on plan. This is a
+# mitigation, not a real fix - a non-hibernating Render plan removes the problem entirely.
+#
+# Note: GitHub auto-disables scheduled workflows after 60 days with no repo activity - if
+# this stops firing, a push to main (or manually re-enabling it under the Actions tab) restarts it.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /healthz
+        run: curl -fsS --max-time 60 https://code-review-backend-jzb0.onrender.com/healthz
