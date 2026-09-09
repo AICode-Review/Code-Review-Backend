@@ -7,13 +7,16 @@ import { cancelOrgSubscription, changeOrgSubscriptionPlan } from "../billing/raz
 import { recordAudit } from "../db/repositories.js";
 import {
   countPlatformAdmins,
+  findUserForAdminGrant,
   getOrgAdminDetail,
   getPlatformOverview,
+  getVisitorStats,
   listAuditLogAdmin,
   listOrgsAdmin,
   getRunAdmin,
   listRunsAdmin,
   listSubscriptionsAdmin,
+  listPlatformAdmins,
   listUsersAdmin,
   setPlatformAdminFlag,
   suspendOrgAdmin,
@@ -28,6 +31,15 @@ const SuspendSchema = z.object({
   reason: z.string().trim().max(500).optional(),
 });
 
+const AddPlatformAdminSchema = z
+  .object({
+    userId: z.string().min(1).optional(),
+    email: z.string().trim().email().optional(),
+  })
+  .refine((d) => Boolean(d.userId) !== Boolean(d.email), {
+    message: "provide exactly one of userId or email",
+  });
+
 const PlatformAdminSchema = z.object({
   isPlatformAdmin: z.boolean(),
 });
@@ -36,6 +48,47 @@ const ChangePlanSchema = z.object({
   tier: z.enum(["pro", "team"]),
 });
 
+type AdminWriteResult =
+  | { ok: true; status: 200 | 201; body: { id: string; isPlatformAdmin: boolean } }
+  | { ok: false; status: 400 | 404 | 409; error: string };
+
+async function grantPlatformAdmin(
+  actor: AuthedUser,
+  lookup: { userId?: string; email?: string },
+  created: boolean,
+): Promise<AdminWriteResult> {
+  const db = getDb();
+  const target = await findUserForAdminGrant(db, lookup);
+  if (!target) {
+    return {
+      ok: false,
+      status: 404,
+      error: lookup.email
+        ? "no signed-in user with that email — they must sign in to the app first"
+        : "user not found",
+    };
+  }
+  if (target.isPlatformAdmin) return { ok: false, status: 409, error: "already a platform admin" };
+  const result = await setPlatformAdminFlag(db, target.id, true);
+  if (!result) return { ok: false, status: 404, error: "user not found" };
+  await recordAudit(db, null, actorLabel(actor), "platform.admin_granted", target.id, { via: "admin" });
+  return { ok: true, status: created ? 201 : 200, body: result };
+}
+
+async function revokePlatformAdmin(actor: AuthedUser, targetId: string): Promise<AdminWriteResult> {
+  const db = getDb();
+  const target = await findUserForAdminGrant(db, { userId: targetId });
+  if (!target) return { ok: false, status: 404, error: "user not found" };
+  if (!target.isPlatformAdmin) return { ok: false, status: 404, error: "not a platform admin" };
+  if ((await countPlatformAdmins(db)) <= 1) {
+    return { ok: false, status: 400, error: "cannot revoke the last platform admin" };
+  }
+  const result = await setPlatformAdminFlag(db, targetId, false);
+  if (!result) return { ok: false, status: 404, error: "user not found" };
+  await recordAudit(db, null, actorLabel(actor), "platform.admin_revoked", targetId, { via: "admin" });
+  return { ok: true, status: 200, body: result };
+}
+
 /** Platform admin console — cross-org reads + operator writes, gated by requireAdmin. */
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", requireAdmin);
@@ -43,6 +96,13 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/admin/overview", async (_req, reply) => {
     const overview = await getPlatformOverview(getDb());
     return reply.send(overview);
+  });
+
+  app.get<{ Querystring: { since?: string } }>("/api/admin/visitors", async (req, reply) => {
+    const since = req.query.since ? new Date(req.query.since) : new Date(0);
+    if (Number.isNaN(since.getTime())) return reply.code(400).send({ error: "invalid since" });
+    const stats = await getVisitorStats(getDb(), since);
+    return reply.send(stats);
   });
 
   app.get("/api/admin/me", async (req, reply) => {
@@ -120,33 +180,34 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ users });
   });
 
+  app.get("/api/admin/admins", async (_req, reply) => {
+    const admins = await listPlatformAdmins(getDb());
+    return reply.send({ admins });
+  });
+
+  app.post<{ Body: unknown }>("/api/admin/admins", async (req, reply) => {
+    const parsed = AddPlatformAdminSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    const result = await grantPlatformAdmin(req.authedUser!, parsed.data, true);
+    if (!result.ok) return reply.code(result.status).send({ error: result.error });
+    return reply.code(result.status).send(result.body);
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/admin/admins/:id", async (req, reply) => {
+    const result = await revokePlatformAdmin(req.authedUser!, req.params.id);
+    if (!result.ok) return reply.code(result.status).send({ error: result.error });
+    return reply.send(result.body);
+  });
+
+  /** @deprecated Prefer POST/DELETE /api/admin/admins — kept so an older console deploy still works. */
   app.patch<{ Params: { id: string }; Body: unknown }>("/api/admin/users/:id", async (req, reply) => {
     const parsed = PlatformAdminSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-
-    const db = getDb();
-    const targetId = req.params.id;
-    const actor = req.authedUser!;
-
-    if (!parsed.data.isPlatformAdmin && targetId === actor.id) {
-      const admins = await countPlatformAdmins(db);
-      if (admins <= 1) {
-        return reply.code(400).send({ error: "cannot revoke the last platform admin" });
-      }
-    }
-
-    const result = await setPlatformAdminFlag(db, targetId, parsed.data.isPlatformAdmin);
-    if (!result) return reply.code(404).send({ error: "user not found" });
-
-    await recordAudit(
-      db,
-      null,
-      actorLabel(actor),
-      parsed.data.isPlatformAdmin ? "platform.admin_granted" : "platform.admin_revoked",
-      targetId,
-      { via: "admin" },
-    );
-    return reply.send(result);
+    const result = parsed.data.isPlatformAdmin
+      ? await grantPlatformAdmin(req.authedUser!, { userId: req.params.id }, false)
+      : await revokePlatformAdmin(req.authedUser!, req.params.id);
+    if (!result.ok) return reply.code(result.status).send({ error: result.error });
+    return reply.send(result.body);
   });
 
   app.get("/api/admin/billing", async (_req, reply) => {

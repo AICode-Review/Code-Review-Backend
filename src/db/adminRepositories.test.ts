@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { createFakeSupabase, type FakeTables } from "../testUtils/fakeSupabase.js";
 import {
   getOrgAdminDetail,
   getOrgSuspension,
   getPlatformOverview,
+  getVisitorStats,
   listAuditLogAdmin,
   listOrgsAdmin,
   getRunAdmin,
@@ -11,6 +13,8 @@ import {
   listSubscriptionsAdmin,
   listUsersAdmin,
   countPlatformAdmins,
+  findUserForAdminGrant,
+  listPlatformAdmins,
   setPlatformAdminFlag,
   suspendOrgAdmin,
   unsuspendOrgAdmin,
@@ -35,7 +39,7 @@ const BASE: FakeTables = {
   subscriptions: [{ org_id: "org-pro", tier: "pro", status: "active", seats: 5, razorpay_customer_id: "cust_1", razorpay_sub_id: "sub_1" }],
   users: [
     { id: "user-1", email: "owner@acme.dev", handle: "owner", seat_active: true, is_platform_admin: false, created_at: isoDaysAgo(25) },
-    { id: "user-2", email: "admin@codeferret.dev", handle: "cfadmin", seat_active: true, is_platform_admin: true, created_at: isoDaysAgo(10) },
+    { id: "user-2", email: "admin@scrutinye.dev", handle: "cfadmin", seat_active: true, is_platform_admin: true, created_at: isoDaysAgo(10) },
   ],
   org_members: [
     { org_id: "org-pro", user_id: "user-1", role: "owner" },
@@ -166,6 +170,45 @@ describe("listUsersAdmin", () => {
   });
 });
 
+function withFakeAuthAdmin(client: SupabaseClient, users: { last_sign_in_at: string | null }[]): SupabaseClient {
+  // supabase-js's real client always has .auth.admin; createFakeSupabase's double doesn't
+  // model the Auth Admin API at all (a separate service from the Postgres tables it fakes),
+  // so this attaches just enough of that shape for getVisitorStats to call.
+  return Object.assign(client, {
+    auth: { admin: { listUsers: async () => ({ data: { users }, error: null }) } },
+  }) as SupabaseClient;
+}
+
+describe("getVisitorStats", () => {
+  it("counts distinct anonymous visitors and distinct recent sign-ins independently", async () => {
+    const { client } = createFakeSupabase({
+      site_visits: [
+        { visitor_id: "v1", path: "/", created_at: isoDaysAgo(1) },
+        { visitor_id: "v1", path: "/pricing", created_at: isoDaysAgo(0) }, // same visitor, 2nd page — counts once
+        { visitor_id: "v2", path: "/", created_at: isoDaysAgo(2) },
+        { visitor_id: "v3", path: "/", created_at: isoDaysAgo(40) }, // outside window
+      ],
+    });
+    const db = withFakeAuthAdmin(client, [
+      { last_sign_in_at: isoDaysAgo(1) },
+      { last_sign_in_at: isoDaysAgo(3) },
+      { last_sign_in_at: null }, // never signed in
+      { last_sign_in_at: isoDaysAgo(45) }, // outside window
+    ]);
+
+    const since = new Date(Date.now() - 30 * 86_400_000);
+    const stats = await getVisitorStats(db, since);
+
+    expect(stats).toEqual({ siteVisitors: 2, loggedInMembers: 2 });
+  });
+
+  it("is all zero when nothing falls in the window", async () => {
+    const { client } = createFakeSupabase({ site_visits: [] });
+    const db = withFakeAuthAdmin(client, []);
+    expect(await getVisitorStats(db, new Date())).toEqual({ siteVisitors: 0, loggedInMembers: 0 });
+  });
+});
+
 describe("listSubscriptionsAdmin", () => {
   it("joins each subscription to its org name", async () => {
     const { client } = createFakeSupabase(structuredClone(BASE));
@@ -251,5 +294,25 @@ describe("suspend / unsuspend / platform admin writes", () => {
     expect(await countPlatformAdmins(client)).toBe(2);
     await setPlatformAdminFlag(client, "user-1", false);
     expect(await countPlatformAdmins(client)).toBe(1);
+  });
+
+  it("lists only platform admins", async () => {
+    const { client } = createFakeSupabase(structuredClone(BASE));
+    const admins = await listPlatformAdmins(client);
+    expect(admins.map((a) => a.id)).toEqual(["user-2"]);
+  });
+
+  it("finds a grant candidate by id or case-insensitive email", async () => {
+    const { client } = createFakeSupabase(structuredClone(BASE));
+    expect(await findUserForAdminGrant(client, { userId: "user-1" })).toMatchObject({
+      id: "user-1",
+      email: "owner@acme.dev",
+      isPlatformAdmin: false,
+    });
+    expect(await findUserForAdminGrant(client, { email: "Admin@Scrutinye.dev" })).toMatchObject({
+      id: "user-2",
+      isPlatformAdmin: true,
+    });
+    expect(await findUserForAdminGrant(client, { email: "nobody@example.com" })).toBeNull();
   });
 });

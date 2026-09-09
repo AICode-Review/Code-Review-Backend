@@ -25,7 +25,7 @@ function fakeRequest(bearer?: string): FastifyRequest {
   return { headers: bearer ? { authorization: `Bearer ${bearer}` } : {} } as unknown as FastifyRequest;
 }
 
-const ADMIN_USER: AuthedUser = { id: "u-1", authUserId: "auth-1", email: "admin@codeferret.dev", githubLogin: null, githubId: null, isPlatformAdmin: true };
+const ADMIN_USER: AuthedUser = { id: "u-1", authUserId: "auth-1", email: "admin@scrutinye.dev", githubLogin: null, githubId: null, isPlatformAdmin: true };
 const NON_ADMIN_USER: AuthedUser = { id: "u-2", authUserId: "auth-2", email: "member@acme.dev", githubLogin: null, githubId: null, isPlatformAdmin: false };
 
 describe("requireAdmin", () => {

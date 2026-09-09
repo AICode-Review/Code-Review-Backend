@@ -20,21 +20,21 @@ async function freshIsBootstrapAdmin() {
 describe("isBootstrapAdmin", () => {
   it("is false when ADMIN_BOOTSTRAP_EMAILS is unset", async () => {
     const isBootstrapAdmin = await freshIsBootstrapAdmin();
-    expect(isBootstrapAdmin("owner@codeferret.dev")).toBe(false);
+    expect(isBootstrapAdmin("owner@scrutinye.dev")).toBe(false);
   });
 
   it("matches a listed email case-insensitively", async () => {
-    process.env["ADMIN_BOOTSTRAP_EMAILS"] = "Owner@CodeFerret.dev, second@codeferret.dev";
+    process.env["ADMIN_BOOTSTRAP_EMAILS"] = "Owner@Scrutinye.dev, second@scrutinye.dev";
     const isBootstrapAdmin = await freshIsBootstrapAdmin();
-    expect(isBootstrapAdmin("owner@codeferret.dev")).toBe(true);
-    expect(isBootstrapAdmin("SECOND@codeferret.dev")).toBe(true);
-    expect(isBootstrapAdmin("nobody@codeferret.dev")).toBe(false);
+    expect(isBootstrapAdmin("owner@scrutinye.dev")).toBe(true);
+    expect(isBootstrapAdmin("SECOND@scrutinye.dev")).toBe(true);
+    expect(isBootstrapAdmin("nobody@scrutinye.dev")).toBe(false);
   });
 
   it("tolerates surrounding whitespace in the allowlist", async () => {
-    process.env["ADMIN_BOOTSTRAP_EMAILS"] = " owner@codeferret.dev , second@codeferret.dev ";
+    process.env["ADMIN_BOOTSTRAP_EMAILS"] = " owner@scrutinye.dev , second@scrutinye.dev ";
     const isBootstrapAdmin = await freshIsBootstrapAdmin();
-    expect(isBootstrapAdmin("second@codeferret.dev")).toBe(true);
+    expect(isBootstrapAdmin("second@scrutinye.dev")).toBe(true);
   });
 
   it("is false for a null/undefined email", () => {

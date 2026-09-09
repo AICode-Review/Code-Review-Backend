@@ -89,6 +89,65 @@ export async function getPlatformOverview(db: SupabaseClient): Promise<PlatformO
   };
 }
 
+export interface VisitorStats {
+  /** Distinct anonymous visitorId values (site_visits, frontend/src/lib/tracking.ts) whose
+   * ping fell in the window — public marketing-site traffic, no sign-in required. */
+  siteVisitors: number;
+  /** Distinct users whose Supabase Auth last_sign_in_at falls in the window — real
+   * authenticated activity, sourced from Supabase Auth directly rather than a second
+   * tracking table, since Supabase already records this for every sign-in. */
+  loggedInMembers: number;
+}
+
+/** Fetched and deduped in JS rather than a `count(distinct ...)` RPC — matches this file's
+ * existing "flat queries over PostgREST embeds/RPCs" convention (see the module doc
+ * comment), and keeps this testable against the same fakeSupabase double as everything
+ * else here. Revisit with a real aggregate query if site_visits ever grows large enough for
+ * this to matter. */
+async function countDistinctVisitors(db: SupabaseClient, since: Date): Promise<number> {
+  const { data } = await db.from("site_visits").select("visitor_id").gte("created_at", since.toISOString());
+  return new Set(((data ?? []) as { visitor_id: string }[]).map((r) => r.visitor_id)).size;
+}
+
+/** Interface narrowed to exactly what this needs from supabase-js's Auth Admin API —
+ * requires the service-role client (getDb()), never the anon key. Paginates through every
+ * user rather than trusting a single page, since a platform-wide "how many members visited"
+ * count that silently truncates past the first page would just be wrong. */
+export interface AuthAdminListUsers {
+  auth: {
+    admin: {
+      listUsers(opts: { page: number; perPage: number }): Promise<{
+        data: { users: { last_sign_in_at: string | null }[] } | null;
+        error: unknown;
+      }>;
+    };
+  };
+}
+
+async function countRecentSignIns(auth: AuthAdminListUsers, since: Date): Promise<number> {
+  const perPage = 1000;
+  let page = 1;
+  let count = 0;
+  for (;;) {
+    const { data, error } = await auth.auth.admin.listUsers({ page, perPage });
+    if (error || !data) break;
+    for (const u of data.users) {
+      if (u.last_sign_in_at && new Date(u.last_sign_in_at) >= since) count++;
+    }
+    if (data.users.length < perPage) break;
+    page++;
+  }
+  return count;
+}
+
+export async function getVisitorStats(db: SupabaseClient, since: Date): Promise<VisitorStats> {
+  const [siteVisitors, loggedInMembers] = await Promise.all([
+    countDistinctVisitors(db, since),
+    countRecentSignIns(db as unknown as AuthAdminListUsers, since),
+  ]);
+  return { siteVisitors, loggedInMembers };
+}
+
 export interface AdminOrgSummary {
   id: string;
   name: string;
@@ -495,6 +554,38 @@ export async function unsuspendOrgAdmin(
     .maybeSingle();
   if (error || !data) return null;
   return { id: data.id as string, suspendedAt: null, suspendedReason: null };
+}
+
+export async function listPlatformAdmins(db: SupabaseClient): Promise<AdminUserSummary[]> {
+  return (await listUsersAdmin(db)).filter((u) => u.isPlatformAdmin);
+}
+
+export interface PlatformAdminCandidate {
+  id: string;
+  email: string | null;
+  handle: string | null;
+  isPlatformAdmin: boolean;
+}
+
+/** Resolve a user for grant/revoke by id or email (email match is case-insensitive). */
+export async function findUserForAdminGrant(
+  db: SupabaseClient,
+  opts: { userId?: string; email?: string },
+): Promise<PlatformAdminCandidate | null> {
+  const { data } = await db.from("users").select("id, email, handle, is_platform_admin");
+  const rows = (data ?? []) as {
+    id: string;
+    email: string | null;
+    handle: string | null;
+    is_platform_admin: boolean;
+  }[];
+  const row = opts.userId
+    ? rows.find((u) => u.id === opts.userId)
+    : opts.email
+      ? rows.find((u) => (u.email ?? "").toLowerCase() === opts.email!.trim().toLowerCase())
+      : undefined;
+  if (!row) return null;
+  return { id: row.id, email: row.email, handle: row.handle, isPlatformAdmin: row.is_platform_admin };
 }
 
 export async function setPlatformAdminFlag(

@@ -8,7 +8,7 @@ describe("isLocalDatabaseUrl", () => {
   });
 
   it("treats docker-compose.selfhosted.yml's bundled Postgres hostname as local (no SSL)", () => {
-    expect(isLocalDatabaseUrl("postgresql://codeferret:change-me@postgres:5432/codeferret")).toBe(true);
+    expect(isLocalDatabaseUrl("postgresql://scrutinye:change-me@postgres:5432/scrutinye")).toBe(true);
   });
 
   it("requires SSL for a real remote host, including one that merely starts with 'postgres'", () => {
