@@ -475,6 +475,11 @@ index 111..222 100644
   });
 
   it("emails the org owner a detailed review-complete summary once SMTP + FRONTEND_URL are configured", async () => {
+    // Resend (email/resend.ts) is preferred over SMTP when RESEND_API_KEY is set — this
+    // test exercises the SMTP/nodemailer path specifically, so a real key sitting in the
+    // local dev .env must not leak in here and silently skip the mocked transport.
+    const originalResendKey = process.env["RESEND_API_KEY"];
+    delete process.env["RESEND_API_KEY"];
     process.env["SMTP_HOST"] = "smtp.example.com";
     process.env["SMTP_USER"] = "user@example.com";
     process.env["SMTP_PASS"] = "secret";
@@ -518,6 +523,8 @@ index 111..222 100644
       delete process.env["SMTP_USER"];
       delete process.env["SMTP_PASS"];
       delete process.env["FRONTEND_URL"];
+      if (originalResendKey === undefined) delete process.env["RESEND_API_KEY"];
+      else process.env["RESEND_API_KEY"] = originalResendKey;
       vi.resetModules();
     }
   });

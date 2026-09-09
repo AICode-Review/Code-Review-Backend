@@ -1,38 +1,32 @@
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport/index.js";
 import { env } from "../config.js";
+import { sendViaResend } from "./resend.js";
+import type { EmailMessage, EmailSendResult } from "./types.js";
 
-export interface EmailMessage {
-  to: string;
-  subject: string;
-  html: string;
-  text: string;
-}
+export type { EmailMessage, EmailSendResult } from "./types.js";
 
-export interface EmailSendResult {
-  sent: boolean;
-  error?: string;
-}
-
-/** Whether SMTP is configured at all — callers use this to decide up front whether it's worth building a message. */
+/** Whether some email transport is configured at all (Resend or SMTP) — callers use this to decide up front whether it's worth building a message. */
 export function emailConfigured(): boolean {
   const e = env();
-  return Boolean(e.SMTP_HOST && e.SMTP_USER && e.SMTP_PASS);
+  return Boolean(e.RESEND_API_KEY) || Boolean(e.SMTP_HOST && e.SMTP_USER && e.SMTP_PASS);
 }
 
 /**
- * Sends via a plain SMTP transport (nodemailer) — works with Gmail Workspace, Office365,
- * Amazon SES, Mailgun, an internal relay, or any other standard SMTP server, whatever the
- * deployment already has credentials for. A fresh transport per call rather than a
- * cached/pooled one — email volume here is transactional (invites, review-complete), not
- * bulk, so the simplicity is worth more than the reused-connection savings. Never throws
- * — a missing config, bad credentials, or a connection failure all degrade to
- * `{ sent: false }` so a broken mail server can never block the caller's actual work.
+ * Resend (HTTP API over HTTPS) is preferred over SMTP when both are configured — see
+ * resend.ts for why: a confirmed production failure where every SMTP send from Render timed
+ * out reaching Gmail. SMTP stays as the path for self-hosted deployments (DESIGN.md §11,
+ * BYO LLM/infra) that bring their own working mail server. Never throws either way — a
+ * missing config, bad credentials, or a connection failure all degrade to `{ sent: false }`
+ * so a broken mail path can never block the caller's actual work.
  */
 export async function sendEmail(message: EmailMessage): Promise<EmailSendResult> {
-  if (!emailConfigured()) return { sent: false, error: "SMTP is not configured (SMTP_HOST/SMTP_USER/SMTP_PASS)" };
-
   const e = env();
+  if (e.RESEND_API_KEY) return sendViaResend(e.RESEND_API_KEY, e.EMAIL_FROM, message);
+  if (!(e.SMTP_HOST && e.SMTP_USER && e.SMTP_PASS)) {
+    return { sent: false, error: "No email transport is configured (RESEND_API_KEY or SMTP_HOST/SMTP_USER/SMTP_PASS)" };
+  }
+
   try {
     // `family` isn't in @types/nodemailer's Options interface (though nodemailer passes
     // it straight through to Node's net/tls connect, which does support it) — assigning

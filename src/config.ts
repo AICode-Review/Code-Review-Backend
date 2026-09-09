@@ -33,6 +33,9 @@ const EnvSchema = z.object({
    * and the review-complete email is silently skipped. Same "explicit gap, not faked"
    * policy used for Razorpay billing elsewhere in this codebase.
    */
+  /** Preferred over SMTP when set (email/resend.ts) — HTTPS API, not raw SMTP, since some
+   * hosts (confirmed on Render) block or drop outbound SMTP-port traffic. */
+  RESEND_API_KEY: z.string().optional(),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().positive().default(587),
   SMTP_USER: z.string().optional(),

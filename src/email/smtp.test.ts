@@ -7,14 +7,29 @@ vi.mock("nodemailer", () => ({
   default: { createTransport: (options: unknown) => createTransportMock(options) },
 }));
 
-const SMTP_ENV_KEYS = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_SECURE", "EMAIL_FROM"] as const;
+const SMTP_ENV_KEYS = [
+  "RESEND_API_KEY",
+  "SMTP_HOST",
+  "SMTP_PORT",
+  "SMTP_USER",
+  "SMTP_PASS",
+  "SMTP_SECURE",
+  "EMAIL_FROM",
+] as const;
 const ORIGINAL_ENV = Object.fromEntries(SMTP_ENV_KEYS.map((k) => [k, process.env[k]]));
+
+const fetchMock = vi.fn();
 
 beforeEach(() => {
   for (const k of SMTP_ENV_KEYS) delete process.env[k];
   vi.resetModules(); // config.ts memoizes env() at module scope — force a fresh read per test.
   sendMailMock.mockReset();
   createTransportMock.mockClear();
+  fetchMock.mockReset();
+  vi.stubGlobal("fetch", fetchMock);
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 afterEach(() => {
   for (const k of SMTP_ENV_KEYS) {
@@ -71,7 +86,7 @@ describe("sendEmail", () => {
     const result = await sendEmail(MESSAGE);
 
     expect(result.sent).toBe(false);
-    expect(result.error).toMatch(/SMTP is not configured/);
+    expect(result.error).toMatch(/No email transport is configured/);
     expect(createTransportMock).not.toHaveBeenCalled();
   });
 
@@ -136,5 +151,47 @@ describe("sendEmail", () => {
     const result = await sendEmail(MESSAGE);
 
     expect(result).toEqual({ sent: false, error: "invalid host" });
+  });
+
+  it("prefers Resend over SMTP when both are configured", async () => {
+    process.env["RESEND_API_KEY"] = "re_test_key";
+    process.env["SMTP_HOST"] = "smtp.example.com";
+    process.env["SMTP_USER"] = "user@example.com";
+    process.env["SMTP_PASS"] = "secret";
+    fetchMock.mockResolvedValue({ ok: true, text: async () => "" });
+    const { sendEmail } = await freshEmailModule();
+
+    const result = await sendEmail(MESSAGE);
+
+    expect(result).toEqual({ sent: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.resend.com/emails",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ authorization: "Bearer re_test_key" }),
+      }),
+    );
+    expect(createTransportMock).not.toHaveBeenCalled();
+  });
+
+  it("degrades to sent:false with the response body when Resend returns a non-ok status", async () => {
+    process.env["RESEND_API_KEY"] = "re_test_key";
+    fetchMock.mockResolvedValue({ ok: false, status: 401, text: async () => "invalid api key" });
+    const { sendEmail } = await freshEmailModule();
+
+    const result = await sendEmail(MESSAGE);
+
+    expect(result.sent).toBe(false);
+    expect(result.error).toMatch(/Resend 401.*invalid api key/);
+  });
+
+  it("degrades to sent:false when the Resend request itself throws — never throws", async () => {
+    process.env["RESEND_API_KEY"] = "re_test_key";
+    fetchMock.mockRejectedValue(new Error("network error"));
+    const { sendEmail } = await freshEmailModule();
+
+    const result = await sendEmail(MESSAGE);
+
+    expect(result).toEqual({ sent: false, error: "network error" });
   });
 });
