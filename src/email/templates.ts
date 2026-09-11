@@ -108,16 +108,29 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => map[c]!);
 }
 
+export type ContactReason = "general" | "billing" | "legal" | "enterprise" | "bug";
+
 export interface ContactSubmissionEmailArgs {
   name: string;
   email: string;
   message: string;
+  reason: ContactReason;
 }
+
+const CONTACT_REASON_COPY: Record<ContactReason, { tag: string; intro: string }> = {
+  general: { tag: "General", intro: "New contact form submission" },
+  billing: { tag: "Billing", intro: "New billing inquiry" },
+  legal: { tag: "Legal", intro: "New legal/privacy inquiry" },
+  enterprise: { tag: "Self-hosted/Enterprise", intro: "New self-hosted or enterprise inquiry" },
+  bug: { tag: "Bug/Feedback", intro: "New bug report or feedback" },
+};
 
 /** Notifies CONTACT_INBOX_EMAIL of a new public "Contact us" form submission — the submission itself is always saved to contact_submissions regardless of whether this send succeeds. */
 export function contactSubmissionEmail(args: ContactSubmissionEmailArgs): EmailContent {
-  const subject = `New contact form submission from ${args.name}`;
+  const { tag, intro } = CONTACT_REASON_COPY[args.reason];
+  const subject = `[${tag}] ${intro} from ${args.name}`;
   const text = [
+    `${intro}`,
     `Name: ${args.name}`,
     `Email: ${args.email}`,
     "",
@@ -126,6 +139,7 @@ export function contactSubmissionEmail(args: ContactSubmissionEmailArgs): EmailC
 
   const html = `
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #18181b;">
+  <p style="display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #3956DD; background: #eef1ff; border-radius: 6px; padding: 2px 8px; margin: 0 0 12px;">${escapeHtml(tag)}</p>
   <p style="font-size: 14px;"><strong>${escapeHtml(args.name)}</strong> &lt;${escapeHtml(args.email)}&gt;</p>
   <p style="font-size: 14px; line-height: 1.6; white-space: pre-wrap;">${escapeHtml(args.message)}</p>
 </div>`.trim();

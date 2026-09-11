@@ -10,6 +10,7 @@ const ContactSchema = z.object({
   name: z.string().trim().min(1).max(200),
   email: z.string().trim().email().max(320),
   message: z.string().trim().min(1).max(5000),
+  reason: z.enum(["general", "billing", "legal", "enterprise", "bug"]).default("general"),
   // Honeypot — left blank and visually hidden for real visitors. Any value here means a
   // bot filled every field it could find; still reply 200 so it never learns to adapt.
   website: z.string().max(200).optional(),
@@ -33,14 +34,14 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const { name, email, message, website } = parsed.data;
+      const { name, email, message, reason, website } = parsed.data;
       if (website) return reply.send({ ok: true });
 
-      await insertContactSubmission(getDb(), { name, email, message });
+      await insertContactSubmission(getDb(), { name, email, message, reason });
 
       const inbox = env().CONTACT_INBOX_EMAIL;
       if (inbox && emailConfigured()) {
-        const result = await sendEmail({ to: inbox, ...contactSubmissionEmail({ name, email, message }) });
+        const result = await sendEmail({ to: inbox, ...contactSubmissionEmail({ name, email, message, reason }) });
         if (!result.sent) console.warn(`[contact] notification email to ${inbox} failed: ${result.error}`);
       }
 
