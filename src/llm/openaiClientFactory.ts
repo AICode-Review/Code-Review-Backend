@@ -1,5 +1,6 @@
 import OpenAI, { AzureOpenAI } from "openai";
 import { env } from "../config.js";
+import { noKeepAliveHttpsAgent } from "./httpAgent.js";
 
 let client: OpenAI | undefined;
 
@@ -18,12 +19,12 @@ export function getOpenAiClient(): OpenAI {
   if (e.AZURE_OPENAI_ENDPOINT) {
     const apiKey = e.AZURE_OPENAI_API_KEY ?? e.OPENAI_API_KEY;
     if (!apiKey) throw new Error("AZURE_OPENAI_API_KEY (or OPENAI_API_KEY) is not set — required when AZURE_OPENAI_ENDPOINT is configured");
-    client = new AzureOpenAI({ apiKey, endpoint: e.AZURE_OPENAI_ENDPOINT, apiVersion: e.AZURE_OPENAI_API_VERSION });
+    client = new AzureOpenAI({ apiKey, endpoint: e.AZURE_OPENAI_ENDPOINT, apiVersion: e.AZURE_OPENAI_API_VERSION, httpAgent: noKeepAliveHttpsAgent });
     return client;
   }
 
   const apiKey = e.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY is not set — required for cross-examination verification and embeddings");
-  client = new OpenAI({ apiKey });
+  client = new OpenAI({ apiKey, httpAgent: noKeepAliveHttpsAgent });
   return client;
 }

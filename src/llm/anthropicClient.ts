@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import { env } from "../config.js";
 import type { LlmMessage } from "./types.js";
+import { noKeepAliveHttpsAgent } from "./httpAgent.js";
 
 let client: Anthropic | undefined;
 let bedrockClient: AnthropicBedrock | undefined;
@@ -28,6 +29,7 @@ function getBedrockClient(): AnthropicBedrock {
     awsRegion: e.AWS_REGION,
     awsAccessKey: e.AWS_ACCESS_KEY_ID,
     awsSecretKey: e.AWS_SECRET_ACCESS_KEY,
+    httpAgent: noKeepAliveHttpsAgent,
   } as ConstructorParameters<typeof AnthropicBedrock>[0];
   bedrockClient ??= new AnthropicBedrock(options);
   return bedrockClient;
@@ -36,7 +38,7 @@ function getBedrockClient(): AnthropicBedrock {
 function getClient(): Anthropic {
   const apiKey = env().ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set — required for logic/security/contracts passes");
-  client ??= new Anthropic({ apiKey });
+  client ??= new Anthropic({ apiKey, httpAgent: noKeepAliveHttpsAgent });
   return client;
 }
 
