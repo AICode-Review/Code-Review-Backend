@@ -6,6 +6,11 @@ import type { LlmMessage } from "./types.js";
 let client: Anthropic | undefined;
 let bedrockClient: AnthropicBedrock | undefined;
 
+// See openaiClient.ts's LLM_CALL_TIMEOUT_MS — same bound, same reason: with no per-call
+// timeout, a stuck request falls back to the SDK's own ~10-minute default, and withRetry's
+// 3 attempts can stack that into a long hang with zero cost/error the whole time.
+const LLM_CALL_TIMEOUT_MS = 90_000;
+
 /**
  * Self-hosted edition (DESIGN.md §11) — AWS_REGION configured means "use
  * Bedrock" ("router honors availability"). Bedrock's Messages API doesn't
@@ -59,12 +64,15 @@ export async function callAnthropic(model: string, messages: LlmMessage[], maxTo
   const anthropicMessages = userMessages.map((m) => ({ role: "user" as const, content: m.content }));
 
   if (env().AWS_REGION) {
-    const res = await getBedrockClient().messages.create({
-      model,
-      max_tokens: maxTokens,
-      ...(systemMessages.length > 0 ? { system: systemMessages.map((m) => m.content).join("\n\n") } : {}),
-      messages: anthropicMessages,
-    });
+    const res = await getBedrockClient().messages.create(
+      {
+        model,
+        max_tokens: maxTokens,
+        ...(systemMessages.length > 0 ? { system: systemMessages.map((m) => m.content).join("\n\n") } : {}),
+        messages: anthropicMessages,
+      },
+      { timeout: LLM_CALL_TIMEOUT_MS },
+    );
     // The Bedrock SDK bundles its own nested @anthropic-ai/sdk types, distinct
     // from the top-level one used elsewhere in this file — plain runtime check.
     const text = res.content
@@ -80,12 +88,15 @@ export async function callAnthropic(model: string, messages: LlmMessage[], maxTo
     ...(m.cacheable ? { cache_control: { type: "ephemeral" as const } } : {}),
   }));
 
-  const res = await getClient().beta.promptCaching.messages.create({
-    model,
-    max_tokens: maxTokens,
-    ...(system.length > 0 ? { system } : {}),
-    messages: anthropicMessages,
-  });
+  const res = await getClient().beta.promptCaching.messages.create(
+    {
+      model,
+      max_tokens: maxTokens,
+      ...(system.length > 0 ? { system } : {}),
+      messages: anthropicMessages,
+    },
+    { timeout: LLM_CALL_TIMEOUT_MS },
+  );
 
   const text = res.content
     .filter((block): block is Anthropic.TextBlock => block.type === "text")
