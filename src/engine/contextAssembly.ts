@@ -24,6 +24,13 @@ export interface ReviewContext {
 const MAX_FILES = 25;
 const MAX_FILE_CHARS = 20_000; // roughly caps per-file prompt size
 const REPO_CONTEXT_TIMEOUT_MS = 60_000; // DESIGN.md §7: never block a review >60s waiting for the index
+// Confirmed in production (2026-09-14): a real review job hung indefinitely — worker alive,
+// zero cost/candidates ever recorded, no error, no timeout — because adapter.getDiff()/getFile()
+// had no timeout at all, unlike the repo-index lookup below. One slow/hanging platform API call
+// silently blocked the entire run forever with no trace in the logs. These two timeouts close
+// that gap; a run that can't fetch its diff/files in reasonable time now fails loudly instead.
+const DIFF_FETCH_TIMEOUT_MS = 30_000;
+const FILE_FETCH_TIMEOUT_MS = 20_000;
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -32,6 +39,13 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "tim
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Same race as withTimeout, but throws instead of returning a sentinel — for calls where a timeout means the whole operation has genuinely failed, not "proceed without this optional part." */
+async function withTimeoutOrThrow<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  const result = await withTimeout(promise, ms);
+  if (result === "timeout") throw new Error(`${label} timed out after ${ms}ms`);
+  return result;
 }
 
 /**
@@ -50,7 +64,7 @@ export async function assembleContext(
   index?: { db: SupabaseClient; repoId: string },
   ignoredPaths: string[] = [],
 ): Promise<ReviewContext> {
-  const diffText = await adapter.getDiff(pr);
+  const diffText = await withTimeoutOrThrow(adapter.getDiff(pr), DIFF_FETCH_TIMEOUT_MS, "adapter.getDiff");
   const prDiff = buildPrDiff({ baseSha, headSha, diffText });
   prDiff.files = prDiff.files.filter(file => !matchesIgnoredPath(file.path, ignoredPaths));
 
@@ -66,7 +80,11 @@ export async function assembleContext(
   const files: ChangedFile[] = [];
   for (const path of changedPaths) {
     try {
-      const content = await adapter.getFile(pr.repo, path, headSha);
+      const content = await withTimeoutOrThrow(
+        adapter.getFile(pr.repo, path, headSha),
+        FILE_FETCH_TIMEOUT_MS,
+        `adapter.getFile(${path})`,
+      );
       const truncated = content.length > MAX_FILE_CHARS;
       files.push({
         path,

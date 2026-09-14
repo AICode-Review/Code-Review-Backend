@@ -303,12 +303,19 @@ export async function handleReviewRun(
       runId = run.id as string;
     }
 
+    // Progress checkpoints, not just start/end — a run that never logs the NEXT one again
+    // has hung at a specific, locatable point instead of leaving zero trace (2026-09-14:
+    // a real run hung indefinitely between "running" and any LLM cost being recorded, and
+    // diagnosing which await never returned took reconstructing timestamps from unrelated
+    // request logs, since nothing here logged its own progress).
+    console.log(`[reviewRun] ${runId} fetching repo config/rulebook/feedback`);
     const [repoConfig, rulebookRules, priorFeedback] = await Promise.all([
       getRepoConfig(db, repoId),
       getActiveRulebookRules(db, orgId, repoId),
       getPriorFindingFeedback(db, prId, runId),
     ]);
 
+    console.log(`[reviewRun] ${runId} assembling context (diff + changed files + repo index)`);
     const ctx = await assembleContext(
       adapter,
       pr,
@@ -317,6 +324,7 @@ export async function handleReviewRun(
       { db, repoId },
       repoConfig.ignoredPaths,
     );
+    console.log(`[reviewRun] ${runId} context ready — ${ctx.files.length} file(s) fetched, starting specialist passes`);
     const fetchedPaths = new Set(ctx.files.map((file) => file.path));
     const missingFiles = ctx.prDiff.files.filter(
       (file) =>
@@ -373,6 +381,7 @@ export async function handleReviewRun(
         ? generateDiagram(router, ctx.prDiff)
         : Promise.resolve(NO_DIAGRAM),
     ]);
+    console.log(`[reviewRun] ${runId} specialist passes complete — ${results.length} candidate(s), verifying`);
     // The walkthrough and diagram are bonus orientation, not specialist passes — neither
     // competes for the pass budget above, but their (typically small) cost still counts
     // toward the run's total spend and per-provider tracking, same as everything else.
