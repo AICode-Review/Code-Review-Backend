@@ -15,6 +15,7 @@ async function loadPrompt(): Promise<string> {
 export interface CrossExamCallResult {
   data: CrossExamOutput | null;
   costUsd: number;
+  provider: "anthropic" | "openai";
   inputTokens: number;
   outputTokens: number;
 }
@@ -89,5 +90,5 @@ export async function crossExamine(
     maxTokens: 1024,
   });
 
-  return { data: result.data, costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+  return { data: result.data, provider: result.provider, costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
 }

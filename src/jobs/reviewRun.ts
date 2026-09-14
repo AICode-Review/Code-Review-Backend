@@ -22,18 +22,35 @@ import { emailConfigured, sendEmail } from "../email/smtp.js";
 import { reviewCompleteEmail } from "../email/templates.js";
 import { createLlmRouter } from "../llm/router.js";
 import type { LlmRouter } from "../llm/types.js";
-import { assembleContext, buildRepoContextBlock } from "../engine/contextAssembly.js";
+import {
+  assembleContext,
+  buildRepoContextBlock,
+} from "../engine/contextAssembly.js";
 import { diffTextForPath } from "../engine/diff.js";
 import { runAllPasses } from "../engine/passRunner.js";
-import { mergeAndScore, suppressPreviouslyDismissed, type PassCandidates, type RulebookBoost } from "../engine/merge.js";
-import { matchesIgnoredPath } from "../engine/ignorePaths.js";
+import {
+  mergeAndScore,
+  suppressPreviouslyDismissed,
+  type PassCandidates,
+  type RulebookBoost,
+} from "../engine/merge.js";
+import { isReviewableSourcePath } from "../engine/binaryFiles.js";
 import { extractCodeSnippet } from "../engine/snippet.js";
-import { validateSuggestedFix, validateSuggestedFixSyntax } from "../engine/suggestedFix.js";
+import {
+  validateSuggestedFix,
+  validateSuggestedFixSyntax,
+} from "../engine/suggestedFix.js";
 import { verifyDeterministicFinding, verifyFinding } from "../verify/index.js";
 import { scanForSecrets, SECRETS_SCAN_PASS } from "../engine/secretsScan.js";
-import { scanDependencies, DEPENDENCY_SCAN_PASS } from "../engine/dependencyScan.js";
+import {
+  scanDependencies,
+  DEPENDENCY_SCAN_PASS,
+} from "../engine/dependencyScan.js";
 import { generateWalkthrough } from "../engine/prWalkthrough.js";
-import { generateDiagram, type DiagramCallResult } from "../engine/prDiagram.js";
+import {
+  generateDiagram,
+  type DiagramCallResult,
+} from "../engine/prDiagram.js";
 import {
   buildLineCommentBody,
   buildSummaryMarkdown,
@@ -46,7 +63,9 @@ import { enqueueRulebookCompile } from "../queue/index.js";
 import type { ReviewRunJob } from "../queue/index.js";
 import type { LineComment, PrRef } from "../types/domain.js";
 
-function buildRulebookBoost(rules: { category: string; weight: number }[]): RulebookBoost {
+function buildRulebookBoost(
+  rules: { category: string; weight: number }[],
+): RulebookBoost {
   return (category: string) => {
     const matching = rules.filter((r) => r.category === category);
     if (matching.length === 0) return 1;
@@ -69,14 +88,24 @@ class RunCancelledError extends Error {}
  * unavailable Docker host (verify/sandbox.ts's own `available: false` path), so a free-tier
  * finding still gets cross-exam-only verification rather than failing outright.
  */
-async function disabledSandbox(): Promise<{ available: boolean; reproduced: boolean; output: string }> {
+async function disabledSandbox(): Promise<{
+  available: boolean;
+  reproduced: boolean;
+  output: string;
+}> {
   return { available: false, reproduced: false, output: "" };
 }
 
 /** DESIGN.md §6.1: bail out (no wasted LLM spend, no stale post) if a newer push has cancelled this run. */
-async function throwIfCancelled(db: ReturnType<typeof getDb>, runId: string): Promise<void> {
+async function throwIfCancelled(
+  db: ReturnType<typeof getDb>,
+  runId: string,
+): Promise<void> {
   const status = await getRunStatus(db, runId);
-  if (status === "cancelled") throw new RunCancelledError(`review_run ${runId} was cancelled — a newer push superseded it`);
+  if (status === "cancelled")
+    throw new RunCancelledError(
+      `review_run ${runId} was cancelled — a newer push superseded it`,
+    );
 }
 
 export interface ReviewRunDeps {
@@ -96,132 +125,218 @@ export interface ReviewRunDeps {
  * fake db and fake router and exercise this whole function for real,
  * without live Supabase/GitHub/Anthropic/OpenAI access.
  */
-export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRunDeps>): Promise<void> {
+export async function handleReviewRun(
+  job: ReviewRunJob,
+  deps?: Partial<ReviewRunDeps>,
+): Promise<void> {
   const startedAt = Date.now();
   const db = deps?.db ?? getDb();
   const adapter = deps?.adapter ?? getAdapter(job.pr.repo.platform);
   const router = deps?.router ?? createLlmRouter();
 
-  // Always fetch authoritative PR info — webhook `command` events arrive with
-  // no head sha, and REST-triggered runs need base sha for the diff too.
-  const prInfo = await adapter.getPrInfo(job.pr);
-  const headSha = prInfo.headSha;
-  const pr = { ...job.pr, title: prInfo.title, author: prInfo.author };
-
-  const { orgId, repoId, prId } = await upsertPrChain(db, pr, headSha);
-
-  // Platform-admin suspend kill-switch — blocks all reviews for the org (webhook + manual + rerun).
-  const { getOrgSuspension } = await import("../db/adminRepositories.js");
-  const suspension = await getOrgSuspension(db, orgId);
-  if (suspension.suspended) {
-    const message = suspension.suspendedReason
-      ? `This organization is suspended: ${suspension.suspendedReason}`
-      : "This organization is suspended. Contact support.";
-    await recordAudit(db, orgId, "system", "review.blocked_by_suspend", repoId, {
-      reason: "org_suspended",
-      suspendedReason: suspension.suspendedReason,
-    });
-    if (job.runId) {
-      await db
-        .from("review_runs")
-        .update({ status: "failed", error: message, blocked_reason: "org_suspended", finished_at: new Date().toISOString() })
-        .eq("id", job.runId);
-    } else {
-      await db.from("review_runs").insert({
-        pr_id: prId,
-        head_sha: headSha,
-        status: "failed",
-        error: message,
-        blocked_reason: "org_suspended",
-        trigger: "automatic",
-        finished_at: new Date().toISOString(),
-      });
-    }
-    return;
-  }
-
-  // Plan enforcement: free plan is public-repos-only. Blocked before any run row is spun
-  // up/spent-on — this is a hard "review never runs," not a partial/degraded one.
-  const repoIsPrivate = await isRepoPrivate(db, repoId);
-  if (!(await canReviewRepo(db, orgId, repoIsPrivate))) {
-    const message = "This repo is private, which requires a Pro or Team plan. Upgrade in Settings to enable reviews on it.";
-    await recordAudit(db, orgId, "system", "review.blocked_by_plan", repoId, { reason: "private_repo_free_plan" });
-    if (job.runId) {
-      await db
-        .from("review_runs")
-        .update({ status: "failed", error: message, blocked_reason: "private_repo_free_plan", finished_at: new Date().toISOString() })
-        .eq("id", job.runId);
-    } else {
-      await db.from("review_runs").insert({
-        pr_id: prId,
-        head_sha: headSha,
-        status: "failed",
-        error: message,
-        blocked_reason: "private_repo_free_plan",
-        trigger: "automatic",
-        finished_at: new Date().toISOString(),
-      });
-    }
-    return;
-  }
-
-  // Monthly usage quota (DESIGN.md pricing — hard-block once exceeded). Checked after the
-  // private-repo gate so a run blocked there never reaches (or counts against) this one.
-  const usage = await getOrgUsage(db, orgId);
-  if (usage.blocked) {
-    const message = formatUsageLimitMessage(usage);
-    await recordAudit(db, orgId, "system", "review.blocked_by_quota", repoId, {
-      reason: "monthly_quota_exceeded",
-      used: usage.used,
-      quota: usage.quota,
-    });
-    if (job.runId) {
-      await db
-        .from("review_runs")
-        .update({ status: "failed", error: message, blocked_reason: "monthly_quota_exceeded", finished_at: new Date().toISOString() })
-        .eq("id", job.runId);
-    } else {
-      await db.from("review_runs").insert({
-        pr_id: prId,
-        head_sha: headSha,
-        status: "failed",
-        error: message,
-        blocked_reason: "monthly_quota_exceeded",
-        trigger: "automatic",
-        finished_at: new Date().toISOString(),
-      });
-    }
-    return;
-  }
-
-  await cancelOtherRunsForPr(db, prId, job.runId);
-
   let runId = job.runId;
-  if (runId) {
-    await db.from("review_runs").update({ status: "running", head_sha: headSha }).eq("id", runId);
-  } else {
-    const { data: run, error } = await db
-      .from("review_runs")
-      .insert({ pr_id: prId, head_sha: headSha, status: "running", trigger: "automatic" })
-      .select("id")
-      .single();
-    if (error || !run) throw new Error(`failed to create review_run: ${error?.message ?? "no row"}`);
-    runId = run.id as string;
-  }
-
+  let knownHeadSha = job.headSha;
+  let spentUsd = 0;
+  let spentAnthropicUsd = 0;
+  let spentOpenaiUsd = 0;
+  let completedHere = false;
   try {
+    if (runId && (await getRunStatus(db, runId)) !== "queued") return;
+    // Always fetch authoritative PR info — webhook `command` events arrive with
+    // no head sha, and REST-triggered runs need base sha for the diff too.
+    const prInfo = await adapter.getPrInfo(job.pr);
+    const headSha = prInfo.headSha;
+    knownHeadSha = headSha;
+    const pr = { ...job.pr, title: prInfo.title, author: prInfo.author };
+
+    const { orgId, repoId, prId } = await upsertPrChain(db, pr, headSha);
+
+    // Platform-admin suspend kill-switch — blocks all reviews for the org (webhook + manual + rerun).
+    const { getOrgSuspension } = await import("../db/adminRepositories.js");
+    const suspension = await getOrgSuspension(db, orgId);
+    if (suspension.suspended) {
+      const message = suspension.suspendedReason
+        ? `This organization is suspended: ${suspension.suspendedReason}`
+        : "This organization is suspended. Contact support.";
+      await recordAudit(
+        db,
+        orgId,
+        "system",
+        "review.blocked_by_suspend",
+        repoId,
+        {
+          reason: "org_suspended",
+          suspendedReason: suspension.suspendedReason,
+        },
+      );
+      if (job.runId) {
+        await db
+          .from("review_runs")
+          .update({
+            status: "failed",
+            error: message,
+            blocked_reason: "org_suspended",
+            finished_at: new Date().toISOString(),
+          })
+          .eq("id", job.runId);
+      } else {
+        await db.from("review_runs").insert({
+          pr_id: prId,
+          head_sha: headSha,
+          status: "failed",
+          error: message,
+          blocked_reason: "org_suspended",
+          trigger: "automatic",
+          finished_at: new Date().toISOString(),
+        });
+      }
+      return;
+    }
+
+    // Plan enforcement: free plan is public-repos-only. Blocked before any run row is spun
+    // up/spent-on — this is a hard "review never runs," not a partial/degraded one.
+    const repoIsPrivate = await isRepoPrivate(db, repoId);
+    if (!(await canReviewRepo(db, orgId, repoIsPrivate))) {
+      const message =
+        "This repo is private, which requires a Pro or Team plan. Upgrade in Settings to enable reviews on it.";
+      await recordAudit(db, orgId, "system", "review.blocked_by_plan", repoId, {
+        reason: "private_repo_free_plan",
+      });
+      if (job.runId) {
+        await db
+          .from("review_runs")
+          .update({
+            status: "failed",
+            error: message,
+            blocked_reason: "private_repo_free_plan",
+            finished_at: new Date().toISOString(),
+          })
+          .eq("id", job.runId);
+      } else {
+        await db.from("review_runs").insert({
+          pr_id: prId,
+          head_sha: headSha,
+          status: "failed",
+          error: message,
+          blocked_reason: "private_repo_free_plan",
+          trigger: "automatic",
+          finished_at: new Date().toISOString(),
+        });
+      }
+      return;
+    }
+
+    // Monthly usage quota (DESIGN.md pricing — hard-block once exceeded). Checked after the
+    // private-repo gate so a run blocked there never reaches (or counts against) this one.
+    const usage = await getOrgUsage(db, orgId, runId);
+    if (usage.blocked) {
+      const message = formatUsageLimitMessage(usage);
+      await recordAudit(
+        db,
+        orgId,
+        "system",
+        "review.blocked_by_quota",
+        repoId,
+        {
+          reason: "monthly_quota_exceeded",
+          used: usage.used,
+          quota: usage.quota,
+        },
+      );
+      if (job.runId) {
+        await db
+          .from("review_runs")
+          .update({
+            status: "failed",
+            error: message,
+            blocked_reason: "monthly_quota_exceeded",
+            finished_at: new Date().toISOString(),
+          })
+          .eq("id", job.runId);
+      } else {
+        await db.from("review_runs").insert({
+          pr_id: prId,
+          head_sha: headSha,
+          status: "failed",
+          error: message,
+          blocked_reason: "monthly_quota_exceeded",
+          trigger: "automatic",
+          finished_at: new Date().toISOString(),
+        });
+      }
+      return;
+    }
+
+    await cancelOtherRunsForPr(db, prId, job.runId);
+
+    if (runId) {
+      const claim = await db
+        .from("review_runs")
+        .update({
+          status: "running",
+          head_sha: headSha,
+          quota_limit: usage.quota ?? -1,
+        })
+        .eq("id", runId)
+        .eq("status", "queued")
+        .select("id")
+        .maybeSingle();
+      if (claim.error)
+        throw new Error(`failed to claim review_run: ${claim.error.message}`);
+      if (!claim.data) return;
+    } else {
+      const { data: run, error } = await db
+        .from("review_runs")
+        .insert({
+          pr_id: prId,
+          head_sha: headSha,
+          status: "running",
+          quota_limit: usage.quota ?? -1,
+          trigger: "automatic",
+        })
+        .select("id")
+        .single();
+      if (error || !run)
+        throw new Error(
+          `failed to create review_run: ${error?.message ?? "no row"}`,
+        );
+      runId = run.id as string;
+    }
+
     const [repoConfig, rulebookRules, priorFeedback] = await Promise.all([
       getRepoConfig(db, repoId),
       getActiveRulebookRules(db, orgId, repoId),
       getPriorFindingFeedback(db, prId, runId),
     ]);
 
-    const ctx = await assembleContext(adapter, pr, prInfo.baseSha, headSha, { db, repoId });
-    ctx.files = ctx.files.filter((f) => !matchesIgnoredPath(f.path, repoConfig.ignoredPaths));
-    ctx.prDiff = {
-      ...ctx.prDiff,
-      files: ctx.prDiff.files.filter((f) => !matchesIgnoredPath(f.path, repoConfig.ignoredPaths)),
-    };
+    const ctx = await assembleContext(
+      adapter,
+      pr,
+      prInfo.baseSha,
+      headSha,
+      { db, repoId },
+      repoConfig.ignoredPaths,
+    );
+    const fetchedPaths = new Set(ctx.files.map((file) => file.path));
+    const missingFiles = ctx.prDiff.files.filter(
+      (file) =>
+        file.path !== "(deleted)" &&
+        isReviewableSourcePath(file.path) &&
+        !fetchedPaths.has(file.path),
+    ).length;
+    const truncatedFiles = ctx.files.filter((file) => file.truncated).length;
+    const coverageWarnings: string[] = [];
+    if (missingFiles)
+      coverageWarnings.push(
+        "Full source was unavailable for " +
+          missingFiles +
+          " changed file(s), due to fetch failures or the file limit.",
+      );
+    if (truncatedFiles)
+      coverageWarnings.push(
+        truncatedFiles +
+          " changed file(s) exceeded the source length limit and were truncated.",
+      );
 
     await throwIfCancelled(db, runId);
 
@@ -230,7 +345,14 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
     // in comment markdown, Bitbucket does not, so a Bitbucket PR never even pays for the
     // generation call — not just "generated but not shown."
     const wantsDiagram = pr.repo.platform === "github";
-    const NO_DIAGRAM: DiagramCallResult = { data: null, costUsd: 0, anthropicCostUsd: 0, openaiCostUsd: 0, inputTokens: 0, outputTokens: 0 };
+    const NO_DIAGRAM: DiagramCallResult = {
+      data: null,
+      costUsd: 0,
+      anthropicCostUsd: 0,
+      openaiCostUsd: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    };
     const [
       {
         results,
@@ -242,18 +364,46 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       walkthrough,
       diagram,
     ] = await Promise.all([
-      runAllPasses(router, ctx, { rulebook: rulebookRules, costCapUsd: costCap }),
+      runAllPasses(router, ctx, {
+        rulebook: rulebookRules,
+        costCapUsd: costCap,
+      }),
       generateWalkthrough(router, ctx.prDiff),
-      wantsDiagram ? generateDiagram(router, ctx.prDiff) : Promise.resolve(NO_DIAGRAM),
+      wantsDiagram
+        ? generateDiagram(router, ctx.prDiff)
+        : Promise.resolve(NO_DIAGRAM),
     ]);
     // The walkthrough and diagram are bonus orientation, not specialist passes — neither
     // competes for the pass budget above, but their (typically small) cost still counts
     // toward the run's total spend and per-provider tracking, same as everything else.
     const passCostUsd = passesCostUsd + walkthrough.costUsd + diagram.costUsd;
-    const passAnthropicCostUsd = passesAnthropicCostUsd + walkthrough.anthropicCostUsd + diagram.anthropicCostUsd;
-    const passOpenaiCostUsd = passesOpenaiCostUsd + walkthrough.openaiCostUsd + diagram.openaiCostUsd;
+    const passAnthropicCostUsd =
+      passesAnthropicCostUsd +
+      walkthrough.anthropicCostUsd +
+      diagram.anthropicCostUsd;
+    const passOpenaiCostUsd =
+      passesOpenaiCostUsd + walkthrough.openaiCostUsd + diagram.openaiCostUsd;
 
-    const candidatesByPass: PassCandidates[] = results.map((r) => ({ pass: r.pass, candidates: r.candidates }));
+    spentUsd = passCostUsd;
+    spentAnthropicUsd = passAnthropicCostUsd;
+    spentOpenaiUsd = passOpenaiCostUsd;
+    const droppedPasses = results
+      .filter((result) => result.dropped)
+      .map((result) => result.pass);
+    if (droppedPasses.length)
+      coverageWarnings.push(
+        "Analysis unavailable: " + droppedPasses.join(", ") + ".",
+      );
+    if (skippedPasses.length)
+      coverageWarnings.push(
+        "Analysis skipped at the cost limit: " + skippedPasses.join(", ") + ".",
+      );
+    let verificationSkipped = 0;
+    let verificationUnavailable = 0;
+    const candidatesByPass: PassCandidates[] = results.map((r) => ({
+      pass: r.pass,
+      candidates: r.candidates,
+    }));
     // Deterministic scans (engine/secretsScan.ts, engine/dependencyScan.ts) — run regardless of
     // the cost cap and every LLM pass's own output, since neither costs an LLM call and neither
     // should depend on an LLM happening to notice. Findings from either "pass" skip
@@ -261,10 +411,19 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
     // risking a skeptic wrongly refuting a mechanical, database/regex-backed match. A
     // dependency-scan failure (OSV.dev unreachable) degrades to zero findings, same as the
     // repo index timing out — it never fails the run.
-    candidatesByPass.push({ pass: SECRETS_SCAN_PASS, candidates: scanForSecrets(ctx.prDiff) });
-    candidatesByPass.push({ pass: DEPENDENCY_SCAN_PASS, candidates: await scanDependencies(ctx.prDiff) });
+    candidatesByPass.push({
+      pass: SECRETS_SCAN_PASS,
+      candidates: scanForSecrets(ctx.prDiff),
+    });
+    candidatesByPass.push({
+      pass: DEPENDENCY_SCAN_PASS,
+      candidates: await scanDependencies(ctx.prDiff),
+    });
     const rulebookBoost = buildRulebookBoost(rulebookRules);
-    const merged = suppressPreviouslyDismissed(mergeAndScore(candidatesByPass, rulebookBoost), priorFeedback);
+    const merged = suppressPreviouslyDismissed(
+      mergeAndScore(candidatesByPass, rulebookBoost),
+      priorFeedback,
+    );
 
     await throwIfCancelled(db, runId);
 
@@ -285,7 +444,10 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       // the cost cap guard either — checked first, before the cap check below would otherwise
       // silently drop a real leaked credential or vulnerable dependency purely because other
       // LLM passes used up the run's budget first.
-      if (m.passes.includes(SECRETS_SCAN_PASS) || m.passes.includes(DEPENDENCY_SCAN_PASS)) {
+      if (
+        m.passes.includes(SECRETS_SCAN_PASS) ||
+        m.passes.includes(DEPENDENCY_SCAN_PASS)
+      ) {
         const outcome = verifyDeterministicFinding(m, filesByPath);
         const sourceContent = filesByPath.get(m.path);
         deliverable.push({
@@ -293,19 +455,35 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
           verificationStatus: outcome.status,
           verificationMethod: outcome.method,
           verifiedHow: outcome.verifiedHow,
-          codeSnippet: env().ZERO_RETENTION ? null : sourceContent ? extractCodeSnippet(sourceContent, m.startLine, m.endLine) : null,
+          codeSnippet: env().ZERO_RETENTION
+            ? null
+            : sourceContent
+              ? extractCodeSnippet(sourceContent, m.startLine, m.endLine)
+              : null,
         });
         continue;
       }
 
       if (passCostUsd + verifyCostUsd >= costCap) {
+        verificationSkipped++;
         // Cost cap reached — remaining candidates are dropped from this run entirely (never posted unverified).
         continue;
       }
-      const outcome = await verifyFinding(router, m, filesByPath, sandboxOverride, diffTextForPath(ctx.prDiff, m.path) ?? undefined, repoContextText);
+      const outcome = await verifyFinding(
+        router,
+        m,
+        filesByPath,
+        sandboxOverride,
+        diffTextForPath(ctx.prDiff, m.path) ?? undefined,
+        repoContextText,
+      );
+      if (outcome.incomplete) verificationUnavailable++;
       verifyCostUsd += outcome.costUsd;
       verifyAnthropicCostUsd += outcome.anthropicCostUsd;
       verifyOpenaiCostUsd += outcome.openaiCostUsd;
+      spentUsd = passCostUsd + verifyCostUsd;
+      spentAnthropicUsd = passAnthropicCostUsd + verifyAnthropicCostUsd;
+      spentOpenaiUsd = passOpenaiCostUsd + verifyOpenaiCostUsd;
       const sourceContent = filesByPath.get(m.path);
 
       // suggestedFix never goes through verify/ (it's not the finding, it's a proposed
@@ -314,18 +492,32 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       // drop the field (never the finding) rather than ship a bad suggestion.
       let suggestedFix = m.suggestedFix;
       if (suggestedFix) {
-        const exactOriginal = sourceContent ? extractCodeSnippet(sourceContent, m.startLine, m.endLine, 0) : null;
-        const check = exactOriginal ? validateSuggestedFix(suggestedFix, exactOriginal) : { valid: false, reason: "original lines unavailable" };
+        const exactOriginal = sourceContent
+          ? extractCodeSnippet(sourceContent, m.startLine, m.endLine, 0)
+          : null;
+        const check = exactOriginal
+          ? validateSuggestedFix(suggestedFix, exactOriginal)
+          : { valid: false, reason: "original lines unavailable" };
         if (!check.valid) {
-          console.warn(`[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — ${check.reason}`);
+          console.warn(
+            `[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — ${check.reason}`,
+          );
           suggestedFix = undefined;
         } else if (sourceContent) {
           // Stronger than the format check above: actually re-parse the file with the
           // fix spliced in, catching a syntactically broken suggestion (unbalanced
           // brace, stray comma) the format check alone can't see.
-          const syntaxCheck = await validateSuggestedFixSyntax(m.path, sourceContent, m.startLine, m.endLine, suggestedFix);
+          const syntaxCheck = await validateSuggestedFixSyntax(
+            m.path,
+            sourceContent,
+            m.startLine,
+            m.endLine,
+            suggestedFix,
+          );
           if (!syntaxCheck.valid) {
-            console.warn(`[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — ${syntaxCheck.reason}`);
+            console.warn(
+              `[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — ${syntaxCheck.reason}`,
+            );
             suggestedFix = undefined;
           }
         }
@@ -336,7 +528,9 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       // it means we have direct proof, not an inference, that the suggestion doesn't resolve
       // the defect it's attached to.
       if (suggestedFix && outcome.fixVerified === "failed") {
-        console.warn(`[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — executed against the sandbox repro and did not resolve it`);
+        console.warn(
+          `[reviewRun] dropped suggestedFix for ${m.path}:${m.startLine} — executed against the sandbox repro and did not resolve it`,
+        );
         suggestedFix = undefined;
       }
 
@@ -349,7 +543,11 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
         // DESIGN.md §11/§13 zero-retention mode: never persist a verbatim source
         // excerpt, only finding metadata (the line comment itself is still posted
         // to the platform as usual — this only affects what we store ourselves).
-        codeSnippet: env().ZERO_RETENTION ? null : sourceContent ? extractCodeSnippet(sourceContent, m.startLine, m.endLine) : null,
+        codeSnippet: env().ZERO_RETENTION
+          ? null
+          : sourceContent
+            ? extractCodeSnippet(sourceContent, m.startLine, m.endLine)
+            : null,
       });
     }
 
@@ -358,8 +556,50 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
     const totalCostUsd = passCostUsd + verifyCostUsd;
     const anthropicCostUsd = passAnthropicCostUsd + verifyAnthropicCostUsd;
     const openaiCostUsd = passOpenaiCostUsd + verifyOpenaiCostUsd;
-    const { posted, digest, rejected } = selectForDelivery(deliverable, repoConfig.commentBudget);
+    const { posted, digest, rejected } = selectForDelivery(
+      deliverable,
+      repoConfig.commentBudget,
+    );
 
+    if (verificationSkipped)
+      coverageWarnings.push(
+        "Verification skipped for " +
+          verificationSkipped +
+          " candidate(s) at the cost limit.",
+      );
+    if (verificationUnavailable)
+      coverageWarnings.push(
+        "Verification unavailable for " +
+          verificationUnavailable +
+          " candidate(s); they were not posted.",
+      );
+    // Persist the point after which a retry must never blindly repeat remote writes.
+    const delivery = await db
+      .from("review_runs")
+      .update({
+        delivery_started_at: new Date().toISOString(),
+        llm_cost_usd: totalCostUsd,
+        anthropic_cost_usd: anthropicCostUsd,
+        openai_cost_usd: openaiCostUsd,
+      })
+      .eq("id", runId)
+      .eq("status", "running")
+      .select("id")
+      .maybeSingle();
+    if (delivery.error)
+      throw new Error(
+        "failed to persist delivery boundary: " + delivery.error.message,
+      );
+    if (!delivery.data) return;
+    const latestPr = await adapter.getPrInfo(pr);
+    if (latestPr.headSha !== headSha) {
+      await db
+        .from("review_runs")
+        .update({ status: "cancelled", finished_at: new Date().toISOString() })
+        .eq("id", runId)
+        .eq("status", "running");
+      return;
+    }
     const existingComments = await adapter.listOwnComments(pr);
     const summaryBody = buildSummaryMarkdown({
       prStats: ctx.prDiff.stats,
@@ -367,6 +607,7 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       digest,
       rejected,
       skippedPasses,
+      coverageWarnings,
       costUsd: totalCostUsd,
       walkthrough: walkthrough.data?.summary,
       diagram: diagram.data?.mermaid,
@@ -378,8 +619,12 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       await adapter.postSummary(pr, summaryBody);
     }
 
-    const postedWithCommentIds: { finding: DeliverableFinding; commentId: string | null }[] = [];
+    const postedWithCommentIds: {
+      finding: DeliverableFinding;
+      commentId: string | null;
+    }[] = [];
     for (const finding of posted) {
+      await throwIfCancelled(db, runId);
       const lineComment: LineComment = {
         path: finding.path,
         line: finding.endLine,
@@ -391,37 +636,41 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
         postedWithCommentIds.push({ finding, commentId });
       } catch (err) {
         // One bad line comment (e.g. line no longer in the diff hunk) never fails the whole run.
-        console.error(`[reviewRun] failed to post line comment for ${finding.path}:${finding.endLine}:`, err);
+        console.error(
+          `[reviewRun] failed to post line comment for ${finding.path}:${finding.endLine}:`,
+          err,
+        );
         postedWithCommentIds.push({ finding, commentId: null });
       }
     }
 
-    const checkState = computeCheckState(deliverable, repoConfig.failOnCritical);
-    await adapter.setStatus(pr, {
-      headSha,
-      state: checkState,
-      title: checkState === "failure" ? "Critical issues found" : "AI Review",
-      summary: summaryBody,
-    });
-
     const findingRows = [
-      ...postedWithCommentIds.map(({ finding, commentId }) => toFindingRow(runId!, finding, true, false, commentId)),
+      ...postedWithCommentIds.map(({ finding, commentId }) =>
+        toFindingRow(runId!, finding, true, false, commentId),
+      ),
       ...digest.map((f) => toFindingRow(runId!, f, false, true, null)),
       ...rejected.map((f) => toFindingRow(runId!, f, false, false, null)),
     ];
     if (findingRows.length > 0) {
-      const { error: insertError } = await db.from("findings").insert(findingRows);
-      if (insertError) console.error("[reviewRun] failed to insert findings:", insertError.message);
+      const { error: insertError } = await db
+        .from("findings")
+        .insert(findingRows);
+      if (insertError)
+        throw new Error(`failed to persist findings: ${insertError.message}`);
     }
 
-    await db
+    const completion = await db
       .from("review_runs")
       .update({
         status: "completed",
+        error: coverageWarnings.length
+          ? `Review incomplete: ${coverageWarnings.join(" ")}`
+          : null,
         finished_at: new Date().toISOString(),
         latency_ms: Date.now() - startedAt,
         candidates: merged.length,
-        verified: deliverable.filter((f) => f.verificationStatus === "verified").length,
+        verified: deliverable.filter((f) => f.verificationStatus === "verified")
+          .length,
         posted: posted.length,
         digest: digest.length,
         llm_cost_usd: totalCostUsd,
@@ -430,7 +679,37 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
         summary: summaryBody,
         source_run_id: job.sourceRunId ?? null,
       })
-      .eq("id", runId);
+      .eq("id", runId)
+      .eq("status", "running")
+      .select("id")
+      .maybeSingle();
+
+    if (completion.error)
+      throw new Error(
+        `failed to complete review_run: ${completion.error.message}`,
+      );
+
+    // A newer push can cancel this run while platform comments are in flight.
+    // Only a run that still owns the running state may publish completion.
+    if (!completion.data) return;
+    completedHere = true;
+
+    const checkState = computeCheckState(
+      deliverable,
+      repoConfig.failOnCritical,
+      coverageWarnings.length > 0,
+    );
+    await adapter.setStatus(pr, {
+      headSha,
+      state: checkState,
+      title:
+        checkState === "failure"
+          ? "Critical issues found"
+          : coverageWarnings.length > 0
+            ? "Review incomplete"
+            : "AI Review",
+      summary: summaryBody,
+    });
 
     // Best-effort: dismissal/downvote feedback compiles into rulebook rules once evidence accumulates.
     if (priorFeedback.size > 0) {
@@ -441,7 +720,11 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
     // stable recipient regardless of how the run was triggered (webhook, manual,
     // rerun). A missing provider, missing FRONTEND_URL, missing recipient email, or
     // a send failure all just skip this silently; the review itself already shipped.
-    if (emailConfigured() && env().FRONTEND_URL) {
+    if (
+      coverageWarnings.length === 0 &&
+      emailConfigured() &&
+      env().FRONTEND_URL
+    ) {
       try {
         const owner = await getOrgOwnerEmail(db, orgId);
         if (owner) {
@@ -449,14 +732,22 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
             repoName: `${pr.repo.owner}/${pr.repo.name}`,
             prNumber: pr.number,
             prTitle: pr.title ?? `PR #${pr.number}`,
-            riskLevel: computeRiskLevel(posted),
-            posted: posted.map((f) => ({ severity: f.severity, title: f.title, path: f.path, line: f.endLine })),
+            riskLevel: computeRiskLevel([...posted, ...digest]),
+            posted: posted.map((f) => ({
+              severity: f.severity,
+              title: f.title,
+              path: f.path,
+              line: f.endLine,
+            })),
             digestCount: digest.length,
             runUrl: `${env().FRONTEND_URL!.replace(/\/+$/, "")}/runs/${runId}`,
             prUrl: prWebUrl(pr),
           });
           const result = await sendEmail({ to: owner.email, ...content });
-          if (!result.sent) console.warn(`[reviewRun] review-complete email failed for ${owner.email}: ${result.error}`);
+          if (!result.sent)
+            console.warn(
+              `[reviewRun] review-complete email failed for ${owner.email}: ${result.error}`,
+            );
         }
       } catch (err) {
         console.warn("[reviewRun] review-complete email skipped:", err);
@@ -468,20 +759,66 @@ export async function handleReviewRun(job: ReviewRunJob, deps?: Partial<ReviewRu
       console.log(`[reviewRun] ${err.message}`);
       return;
     }
-    await db
-      .from("review_runs")
-      .update({
-        status: "failed",
-        finished_at: new Date().toISOString(),
-        latency_ms: Date.now() - startedAt,
-        error: err instanceof Error ? err.message : String(err),
-      })
-      .eq("id", runId);
+    if (runId) {
+      const failure = await db
+        .from("review_runs")
+        .update({
+          status: "failed",
+          llm_cost_usd: spentUsd,
+          anthropic_cost_usd: spentAnthropicUsd,
+          openai_cost_usd: spentOpenaiUsd,
+          finished_at: new Date().toISOString(),
+          latency_ms: Date.now() - startedAt,
+          error: err instanceof Error ? err.message : String(err),
+          ...((err instanceof Error ? err.message : String(err)).includes(
+            "monthly_quota_exceeded",
+          )
+            ? { blocked_reason: "monthly_quota_exceeded" }
+            : {}),
+        })
+        .eq("id", runId)
+        .in(
+          "status",
+          completedHere
+            ? ["queued", "running", "completed"]
+            : ["queued", "running"],
+        )
+        .select("id")
+        .maybeSingle();
+      if (failure.error)
+        console.error(
+          "[reviewRun] failed to record run failure:",
+          failure.error.message,
+        );
+      else if (!failure.data) return;
+    }
+    if (knownHeadSha) {
+      await adapter
+        .setStatus(job.pr, {
+          headSha: knownHeadSha,
+          state: "failure",
+          title: "Review could not complete",
+          summary:
+            "Scrutinye could not finish this review. Open the run in Scrutinye for details and retry. This is not a clean review result.",
+        })
+        .catch((statusError) =>
+          console.error(
+            "[reviewRun] failed to publish failure status:",
+            statusError,
+          ),
+        );
+    }
     throw err;
   }
 }
 
-function toFindingRow(runId: string, f: DeliverableFinding, posted: boolean, inDigest: boolean, commentId: string | null) {
+function toFindingRow(
+  runId: string,
+  f: DeliverableFinding,
+  posted: boolean,
+  inDigest: boolean,
+  commentId: string | null,
+) {
   return {
     run_id: runId,
     pass: f.passes[0] ?? f.category,

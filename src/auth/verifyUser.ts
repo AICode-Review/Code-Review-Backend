@@ -137,7 +137,7 @@ export async function ensureOrgAccess(db: SupabaseClient, user: AuthedUser, orgI
       .select("id, role")
       .eq("org_id", orgId)
       .eq("status", "pending")
-      .ilike("email", user.email)
+      .eq("email", user.email.toLowerCase())
       .gt("expires_at", new Date().toISOString())
       .maybeSingle();
     if (invite) {

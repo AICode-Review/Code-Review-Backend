@@ -12,7 +12,8 @@ import { JOBS, type ReviewRunJob, type ChatReplyJob } from "./queue/index.js";
  */
 
 const handleReviewRunMock = vi.fn(async (_job: ReviewRunJob) => {});
-vi.mock("./jobs/reviewRun.js", () => ({ handleReviewRun: (job: ReviewRunJob) => handleReviewRunMock(job) }));
+vi.mock("./jobs/reviewRecovery.js", () => ({ executeReviewJob: (_id: string, job: ReviewRunJob) => handleReviewRunMock(job) }));
+vi.mock("./jobs/operations.js", () => ({maintainOperations: vi.fn(async()=>{})}));
 
 const handleChatReplyMock = vi.fn(async (_job: ChatReplyJob) => {});
 vi.mock("./jobs/chatReply.js", () => ({ handleChatReply: (job: ChatReplyJob) => handleChatReplyMock(job) }));
@@ -51,7 +52,7 @@ vi.mock("./queue/index.js", async (importActual) => {
   const actual = await importActual<typeof import("./queue/index.js")>();
   return {
     ...actual,
-    getBoss: vi.fn(async () => ({ work: workMock, schedule: scheduleMock })),
+    getBoss: vi.fn(async () => ({ work: workMock, schedule: scheduleMock, fail: vi.fn(async()=>{}) })),
     stopBoss: vi.fn(async () => {}),
   };
 });

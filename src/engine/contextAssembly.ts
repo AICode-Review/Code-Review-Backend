@@ -4,6 +4,7 @@ import type { PrRef } from "../types/domain.js";
 import { getContext, type RepoContext } from "../indexer/context.js";
 import { buildPrDiff, diffFileToPromptText, type PrDiff } from "./diff.js";
 import { isReviewableSourcePath } from "./binaryFiles.js";
+import { matchesIgnoredPath } from "./ignorePaths.js";
 import { extractChangedSymbols } from "./changedSymbols.js";
 
 export interface ChangedFile {
@@ -25,7 +26,12 @@ const MAX_FILE_CHARS = 20_000; // roughly caps per-file prompt size
 const REPO_CONTEXT_TIMEOUT_MS = 60_000; // DESIGN.md §7: never block a review >60s waiting for the index
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
-  return Promise.race([promise, new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms))]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -42,9 +48,11 @@ export async function assembleContext(
   baseSha: string,
   headSha: string,
   index?: { db: SupabaseClient; repoId: string },
+  ignoredPaths: string[] = [],
 ): Promise<ReviewContext> {
   const diffText = await adapter.getDiff(pr);
   const prDiff = buildPrDiff({ baseSha, headSha, diffText });
+  prDiff.files = prDiff.files.filter(file => !matchesIgnoredPath(file.path, ignoredPaths));
 
   // Binary/generated files still show up in prDiff (accurate "N files changed" stats,
   // visible in the diff viewer) — they're just never fetched for the specialist

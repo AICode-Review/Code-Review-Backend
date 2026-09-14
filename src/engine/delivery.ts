@@ -46,11 +46,11 @@ export function computeRiskLevel(posted: DeliverableFinding[]): RiskLevel {
 export type CheckState = "success" | "neutral" | "failure";
 
 /** Fail only on critical VERIFIED findings (configurable via failOnCritical), per DESIGN.md §6.6. */
-export function computeCheckState(allFindings: DeliverableFinding[], failOnCritical: boolean): CheckState {
+export function computeCheckState(allFindings: DeliverableFinding[], failOnCritical: boolean, incomplete = false): CheckState {
   const hasCriticalVerified = allFindings.some((f) => f.verificationStatus === "verified" && f.severity === "critical");
   if (failOnCritical && hasCriticalVerified) return "failure";
   const hasAnyVerified = allFindings.some((f) => f.verificationStatus === "verified");
-  return hasAnyVerified ? "neutral" : "success";
+  return hasAnyVerified || incomplete ? "neutral" : "success";
 }
 
 export function buildLineCommentBody(f: DeliverableFinding): string {
@@ -86,6 +86,7 @@ export interface SummaryArgs {
   skippedPasses: string[];
   costUsd: number;
   staleIndex?: boolean;
+  coverageWarnings?: string[];
   /** AI-generated plain-English "what does this diff do" orientation (engine/prWalkthrough.ts)
    * — undefined when generation failed schema validation or wasn't attempted; the summary
    * comment reads fine without it, this is a bonus, not a load-bearing section. */
@@ -102,7 +103,8 @@ const RISK_LABEL: Record<RiskLevel, string> = { high: "🔴 high", medium: "🟡
 
 /** DESIGN.md §6.6 — single summary comment, updated in place on re-runs. */
 export function buildSummaryMarkdown(args: SummaryArgs): string {
-  const risk = computeRiskLevel(args.posted);
+  const risk = computeRiskLevel([...args.posted, ...args.digest]);
+  const warnings = args.coverageWarnings ?? [];
   const lines: string[] = [SUMMARY_MARKER, "### 🤖 AI Review", ""];
 
   if (args.walkthrough) {
@@ -123,8 +125,12 @@ export function buildSummaryMarkdown(args: SummaryArgs): string {
     );
   }
 
+  if (warnings.length > 0) {
+    lines.push("**Review incomplete — do not treat this result as a clean bill of health.**", ...warnings.map(warning => `- ${warning}`), "");
+  }
+
   lines.push(
-    `**Risk: ${RISK_LABEL[risk]}** · ${args.prStats.files} file${args.prStats.files === 1 ? "" : "s"} changed, +${args.prStats.additions}/-${args.prStats.deletions}`,
+    `**Risk: ${warnings.length > 0 && risk === "none" ? "undetermined (incomplete review)" : RISK_LABEL[risk]}** · ${args.prStats.files} file${args.prStats.files === 1 ? "" : "s"} changed, +${args.prStats.additions}/-${args.prStats.deletions}`,
     "",
   );
 
@@ -135,7 +141,10 @@ export function buildSummaryMarkdown(args: SummaryArgs): string {
     });
     lines.push("");
   } else {
-    lines.push("No high-severity verified findings this run.", "");
+    lines.push(args.digest.some(f => f.severity === "critical" || f.severity === "major")
+      ? "High-severity verified findings are included in the digest below (inline comment budget)."
+      : warnings.length > 0 ? "No high-severity findings were verified in the completed checks. Review coverage is incomplete."
+      : "No high-severity verified findings this run.", "");
   }
 
   if (args.digest.length > 0) {

@@ -215,3 +215,19 @@ describe("buildLineCommentBody", () => {
     expect(body).not.toContain("```suggestion");
   });
 });
+
+describe("review result integrity", () => {
+  it("includes a critical finding in risk even when the inline budget is zero", () => {
+    const md = buildSummaryMarkdown({ prStats: { files: 1, additions: 1, deletions: 0 }, posted: [], digest: [finding({ severity: "critical" })], rejected: [], skippedPasses: [], costUsd: 0 });
+    expect(md).toContain("🔴 high");
+    expect(md).not.toContain("No high-severity verified findings");
+  });
+  it("keeps critical failure stronger than an incomplete result", () => {
+    expect(computeCheckState([finding({ severity: "critical" })], true, true)).toBe("failure");
+    expect(computeCheckState([], false, true)).toBe("neutral");
+  });
+  it("does not label unknown risk as no risk after incomplete checks", () => {
+    const md = buildSummaryMarkdown({ prStats: { files: 1, additions: 1, deletions: 0 }, posted: [], digest: [], rejected: [], skippedPasses: [], costUsd: 0, coverageWarnings: ["Security analysis unavailable."] });
+    expect(md).toContain("Review incomplete"); expect(md).toContain("Security analysis unavailable."); expect(md).not.toContain("✅ none");
+  });
+});

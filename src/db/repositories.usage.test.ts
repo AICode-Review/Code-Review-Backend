@@ -50,6 +50,7 @@ function seedOrg(opts: {
       pr_id: opts.prId,
       status: r.status,
       started_at: r.started_at,
+      quota_reserved_at: r.status === "queued" ? null : r.started_at,
       blocked_reason: r.blocked_reason ?? null,
       llm_cost_usd: r.llm_cost_usd ?? 0,
     })),

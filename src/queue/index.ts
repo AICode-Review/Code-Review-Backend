@@ -1,10 +1,14 @@
 import PgBoss from "pg-boss";
+import { randomUUID } from "node:crypto";
+import { transactionDb, withTransaction } from "../db/postgres.js";
 import { z } from "zod";
 import { env } from "../config.js";
 import { PrRefSchema } from "../types/domain.js";
 
 export const JOBS = {
   reviewRun: "review.run",
+  webhookEvent: "webhook.event",
+  maintenance: "operations.maintenance",
   indexRepo: "index.repo",
   verifyFinding: "verify.finding",
   rulebookCompile: "rulebook.compile",
@@ -56,32 +60,42 @@ export type IndexRepoJob = z.infer<typeof IndexRepoJobSchema>;
 export const REVIEW_DEBOUNCE_SECONDS = 90;
 
 let boss: PgBoss | undefined;
+let starting: Promise<PgBoss> | undefined;
 
+/** Share initialization across requests; never expose a partially started queue. */
 export async function getBoss(): Promise<PgBoss> {
-  if (!boss) {
-    // Supabase's session-mode pooler caps this DATABASE_URL at 15 total connections
-    // shared across every client (server + worker are separate processes, each with
-    // their own pg-boss instance/pool, plus any local/dev/diagnostic connections).
-    // pg-boss's own pg.Pool defaults to max:10 per instance, so two uncapped
-    // instances alone can hit 20 and blow the cap — cap each process's pool small.
-    boss = new PgBoss({ connectionString: env().DATABASE_URL, max: 4 });
-    boss.on("error", (err) => console.error("[pg-boss]", err));
-    await boss.start();
-    for (const name of Object.values(JOBS)) {
+  if (boss) return boss;
+  if (!starting) {
+    starting = (async () => {
+      const candidate = new PgBoss({
+        connectionString: env().DATABASE_URL,
+        max: 4,
+      });
+      candidate.on("error", (err) => console.error("[pg-boss]", err));
       try {
-        await boss.createQueue(name);
-      } catch {
-        // queue already exists
+        await candidate.start();
+        // createQueue is idempotent. Connection/permission errors must reach the caller.
+        for (const name of Object.values(JOBS))
+          await candidate.createQueue(name);
+        boss = candidate;
+        return candidate;
+      } catch (err) {
+        await candidate.stop().catch(() => undefined);
+        throw err;
       }
-    }
+    })().finally(() => {
+      starting = undefined;
+    });
   }
-  return boss;
+  return starting;
 }
 
 export async function stopBoss(): Promise<void> {
-  if (boss) {
-    await boss.stop();
-    boss = undefined;
+  const active =
+    boss ?? (starting ? await starting.catch(() => undefined) : undefined);
+  if (active) {
+    await active.stop();
+    if (boss === active) boss = undefined;
   }
 }
 
@@ -91,34 +105,81 @@ export function prSingletonKey(job: Pick<ReviewRunJob, "pr">): string {
 }
 
 /** Enqueue a review with a 90s debounce per PR — rapid pushes collapse into one run (webhook path). */
-export async function enqueueReviewRun(job: ReviewRunJob): Promise<string | null> {
+export async function enqueueReviewRun(
+  job: ReviewRunJob,
+): Promise<string | null> {
   const b = await getBoss();
-  return b.sendDebounced(JOBS.reviewRun, job, {}, REVIEW_DEBOUNCE_SECONDS, prSingletonKey(job));
+  return b.sendDebounced(
+    JOBS.reviewRun,
+    job,
+    { db: transactionDb(), retryLimit: 5, retryDelay: 30, expireInMinutes: 30 },
+    REVIEW_DEBOUNCE_SECONDS,
+    prSingletonKey(job),
+  );
 }
 
 /** Enqueue immediately, no debounce — used for explicit user actions (manual trigger, rerun) where waiting 90s would be surprising. */
-export async function enqueueReviewRunNow(job: ReviewRunJob): Promise<string | null> {
+export async function enqueueReviewRunNow(
+  job: ReviewRunJob,
+): Promise<string | null> {
   const b = await getBoss();
-  return b.send(JOBS.reviewRun, job);
+  return b.send(JOBS.reviewRun, job, {
+    db: transactionDb(),
+    retryLimit: 5,
+    retryDelay: 30,
+    expireInMinutes: 30,
+  });
 }
 
-export async function enqueueRulebookCompile(job: RulebookCompileJob): Promise<string | null> {
+export async function enqueueRulebookCompile(
+  job: RulebookCompileJob,
+): Promise<string | null> {
   const b = await getBoss();
-  return b.send(JOBS.rulebookCompile, job);
+  return b.send(JOBS.rulebookCompile, job, { db: transactionDb() });
 }
 
-export async function enqueueHealthSnapshot(job: HealthSnapshotJob): Promise<string | null> {
+export async function enqueueHealthSnapshot(
+  job: HealthSnapshotJob,
+): Promise<string | null> {
   const b = await getBoss();
-  return b.send(JOBS.healthSnapshot, job);
+  return b.send(JOBS.healthSnapshot, job, { db: transactionDb() });
 }
 
-export async function enqueueChatReply(job: ChatReplyJob): Promise<string | null> {
+export async function enqueueChatReply(
+  job: ChatReplyJob,
+): Promise<string | null> {
   const b = await getBoss();
-  return b.send(JOBS.chatReply, job);
+  return b.send(JOBS.chatReply, job, { db: transactionDb() });
 }
 
 /** Debounced per-repo — "installed" fans out once per repo, a burst of pushes to the default branch shouldn't each trigger a full re-clone+re-embed. */
-export async function enqueueIndexRepo(job: IndexRepoJob): Promise<string | null> {
+export async function enqueueIndexRepo(
+  job: IndexRepoJob,
+): Promise<string | null> {
   const b = await getBoss();
-  return b.sendDebounced(JOBS.indexRepo, job, {}, 60, `index:${job.repoId}`);
+  return b.sendDebounced(
+    JOBS.indexRepo,
+    job,
+    { db: transactionDb() },
+    60,
+    `index:${job.repoId}`,
+  );
+}
+
+/** REST callers receive a run id only after both the row and queue job commit. */
+export async function createQueuedReview(
+  prId: string,
+  job: ReviewRunJob,
+): Promise<string> {
+  await getBoss();
+  return withTransaction(async (client) => {
+    const id = randomUUID();
+    await client.query(
+      "insert into review_runs(id,pr_id,head_sha,status,trigger,source_run_id) values($1,$2,$3,'queued','manual',$4)",
+      [id, prId, job.headSha, job.sourceRunId ?? null],
+    );
+    if (!(await enqueueReviewRunNow({ ...job, runId: id })))
+      throw new Error("Review could not be queued");
+    return id;
+  });
 }

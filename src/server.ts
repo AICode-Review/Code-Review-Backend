@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import Fastify, { type FastifyError } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
@@ -10,10 +11,10 @@ import { adminRoutes } from "./routes/admin.js";
 import { bitbucketConnectRoutes } from "./routes/bitbucketConnect.js";
 import { contactRoutes } from "./routes/contact.js";
 import { trackRoutes } from "./routes/track.js";
+import { checkReadiness } from "./jobs/operations.js";
+import { stopPool } from "./db/postgres.js";
 import { stopBoss } from "./queue/index.js";
 import { captureError, initSentry } from "./observability/sentry.js";
-
-initSentry();
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -23,7 +24,14 @@ declare module "fastify" {
 
 export function buildServer() {
   const app = Fastify({
-    logger: { level: env().NODE_ENV === "production" ? "info" : "debug" },
+    logger: {
+      level: env().NODE_ENV === "production" ? "info" : "debug",
+      redact: [
+        "req.headers.authorization",
+        "req.headers.cookie",
+        "res.headers",
+      ],
+    },
   });
 
   app.register(cors, {
@@ -44,28 +52,59 @@ export function buildServer() {
   });
 
   // Keep the raw body around for webhook signature verification.
-  app.addContentTypeParser("application/json", { parseAs: "buffer" }, (req, body, done) => {
-    req.rawBody = body as Buffer;
-    if ((body as Buffer).length === 0) return done(null, {});
-    try {
-      done(null, JSON.parse((body as Buffer).toString("utf8")));
-    } catch (err) {
-      done(err as Error);
-    }
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "buffer" },
+    (req, body, done) => {
+      req.rawBody = body as Buffer;
+      if ((body as Buffer).length === 0) return done(null, {});
+      try {
+        done(null, JSON.parse((body as Buffer).toString("utf8")));
+      } catch (err) {
+        done(Object.assign(err as Error, { statusCode: 400 }));
+      }
+    },
+  );
+
+  app.addHook("onSend", async (_request, reply, payload) => {
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("Referrer-Policy", "no-referrer");
+    reply.header("Cache-Control", "no-store");
+    return payload;
   });
 
-  // Fastify already logs every error via its own logger; this just also forwards
-  // 5xx-level failures to Sentry (a no-op when SENTRY_DSN is unset) before falling
-  // through to Fastify's normal error response.
   app.setErrorHandler((error: FastifyError, request, reply) => {
-    const statusCode = error.statusCode ?? 500;
-    if (statusCode >= 500) captureError(error, { url: request.url, method: request.method });
-    // Delegate to Fastify's own default serialization ({statusCode, error, message}) —
-    // this handler only adds the Sentry side effect, it doesn't change the response shape.
-    reply.status(statusCode).send(error);
+    const statusCode =
+      error.statusCode && error.statusCode >= 400 && error.statusCode <= 599
+        ? error.statusCode
+        : 500;
+    if (statusCode >= 500) {
+      request.log.error(
+        { err: error, requestId: request.id },
+        "Request failed",
+      );
+      captureError(error, {
+        url: request.routeOptions.url ?? request.url.split("?")[0],
+        method: request.method,
+      });
+      return reply.status(statusCode).send({
+        error: "Internal server error",
+        message: "The request could not be completed. Please retry.",
+        requestId: request.id,
+      });
+    }
+    return reply.status(statusCode).send(error);
   });
 
   app.get("/healthz", async () => ({ ok: true }));
+  app.get("/readyz", async (_req, reply) => {
+    try {
+      if (await checkReadiness()) return { ok: true };
+    } catch {
+      /* Readiness must not expose infrastructure or credential details. */
+    }
+    return reply.code(503).send({ ok: false });
+  });
 
   app.register(webhookRoutes);
   app.register(razorpayWebhookRoutes);
@@ -78,33 +117,43 @@ export function buildServer() {
   return app;
 }
 
-const app = buildServer();
+export const isMainModule =
+  Boolean(process.argv[1]) &&
+  import.meta.url === pathToFileURL(process.argv[1] as string).href;
 
-const license = verifyLicense();
-if (!license.valid) {
-  app.log.fatal(`Self-hosted license check failed: ${license.error}`);
-  process.exit(1);
-}
+if (isMainModule) {
+  initSentry();
+  const app = buildServer();
 
-app.listen({ port: env().PORT, host: "0.0.0.0" }).catch((err) => {
-  captureError(err);
-  app.log.error(err);
-  process.exit(1);
-});
+  const license = verifyLicense();
+  if (!license.valid) {
+    app.log.fatal(`Self-hosted license check failed: ${license.error}`);
+    process.exit(1);
+  }
 
-process.on("uncaughtException", (err) => {
-  captureError(err);
-  app.log.fatal(err, "uncaughtException");
-});
-process.on("unhandledRejection", (err) => {
-  captureError(err);
-  app.log.error(err, "unhandledRejection");
-});
-
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, async () => {
-    await app.close();
-    await stopBoss();
-    process.exit(0);
+  app.listen({ port: env().PORT, host: "0.0.0.0" }).catch((err) => {
+    captureError(err);
+    app.log.error(err);
+    process.exit(1);
   });
+
+  process.on("uncaughtException", (err) => {
+    captureError(err);
+    app.log.fatal(err, "uncaughtException");
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (err) => {
+    captureError(err);
+    app.log.error(err, "unhandledRejection");
+    process.exit(1);
+  });
+
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, async () => {
+      await app.close();
+      await stopBoss();
+      await stopPool();
+      process.exit(0);
+    });
+  }
 }

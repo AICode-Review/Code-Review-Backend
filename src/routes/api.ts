@@ -45,7 +45,7 @@ import { planFixApplication } from "../engine/applyFix.js";
 import { conventionalTestPath, generateTestFile, validateGeneratedTestFile } from "../engine/testGen.js";
 import { answerRepoChat } from "../engine/repoChat.js";
 import { createLlmRouter } from "../llm/router.js";
-import { enqueueIndexRepo, enqueueReviewRunNow, enqueueRulebookCompile } from "../queue/index.js";
+import { enqueueIndexRepo, createQueuedReview, enqueueRulebookCompile } from "../queue/index.js";
 import { buildWeeklyAnalytics, categoryCounts } from "./analyticsAggregation.js";
 import { env } from "../config.js";
 import { emailConfigured, sendEmail } from "../email/smtp.js";
@@ -366,16 +366,9 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
 
     const { pr, headSha } = await getPrRefByRunId(db, sourceRunId);
 
-    const { data: newRun, error } = await db
-      .from("review_runs")
-      .insert({ pr_id: ctx.prId, head_sha: headSha, status: "queued", trigger: "manual", source_run_id: sourceRunId })
-      .select("id")
-      .single();
-    if (error || !newRun) return reply.code(500).send({ error: `failed to create run: ${error?.message ?? ""}` });
-
-    await enqueueReviewRunNow({ pr, headSha, reason: "rerun", runId: newRun.id as string, sourceRunId });
+    const newRunId = await createQueuedReview(ctx.prId, { pr, headSha, reason: "rerun", sourceRunId });
     await recordAudit(db, ctx.orgId, actorLabel(req.authedUser!), "run.retriggered", `${pr.repo.owner}/${pr.repo.name}#${pr.number}`);
-    return reply.send({ id: newRun.id });
+    return reply.send({ id: newRunId });
   });
 
   // ------------------------------------------------------------------ trigger
@@ -418,16 +411,9 @@ export async function apiRoutes(app: FastifyInstance): Promise<void> {
     const pr = { ...prStub, title: info.title, author: info.author };
 
     const { prId } = await upsertPrChain(db, pr, info.headSha);
-    const { data: newRun, error } = await db
-      .from("review_runs")
-      .insert({ pr_id: prId, head_sha: info.headSha, status: "queued", trigger: "manual" })
-      .select("id")
-      .single();
-    if (error || !newRun) return reply.code(500).send({ error: `failed to create run: ${error?.message ?? ""}` });
-
-    await enqueueReviewRunNow({ pr, headSha: info.headSha, reason: "manual", runId: newRun.id as string });
+    const newRunId = await createQueuedReview(prId, { pr, headSha: info.headSha, reason: "manual" });
     await recordAudit(db, orgId, actorLabel(req.authedUser!), "review.triggered", `${repoName}#${prNumber}`);
-    return reply.send({ id: newRun.id });
+    return reply.send({ id: newRunId });
   });
 
   // ------------------------------------------------------------ repo config

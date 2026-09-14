@@ -401,3 +401,12 @@ describe("verifyFinding — executing the suggested fix, not just checking its s
     expect(outcome.fixVerified).toBeUndefined();
   });
 });
+
+it.each(["anthropic", "openai"] as const)("attributes all verification charges to %s when the router falls back to one provider", async provider => {
+  const fake = createFakeRouter({ "verify.cross_exam": { verdict: "upheld", reasoning: "Confirmed" }, "verify.repro_gen": { canGenerate: false } });
+  const router: LlmRouter = { complete: async request => ({ ...await fake.complete(request), provider }) };
+  const result = await verifyFinding(router, candidate({ needsExecution: true }), FILES);
+  expect(result.costUsd).toBeGreaterThan(0);
+  expect(result.anthropicCostUsd).toBe(provider === "anthropic" ? result.costUsd : 0);
+  expect(result.openaiCostUsd).toBe(provider === "openai" ? result.costUsd : 0);
+});

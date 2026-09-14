@@ -565,13 +565,19 @@ export async function cancelOtherRunsForPr(db: SupabaseClient, prId: string, exc
     .update({ status: "cancelled", finished_at: new Date().toISOString() })
     .eq("pr_id", prId)
     .in("status", ["queued", "running"]);
-  if (excludeRunId) query = query.neq("id", excludeRunId);
+  if (excludeRunId) {
+    query = query.neq("id", excludeRunId);
+    const current = await db.from("review_runs").select("started_at").eq("id",excludeRunId).maybeSingle();
+    if (current.error) throw new Error("db: failed to order superseding reviews: " + current.error.message);
+    if (current.data?.started_at) query = query.lt("started_at",current.data.started_at);
+  }
   const { error } = await query;
   if (error) throw new Error(`db: failed to cancel superseded runs for PR ${prId}: ${error.message}`);
 }
 
 export async function getRunStatus(db: SupabaseClient, runId: string): Promise<string | null> {
-  const { data } = await db.from("review_runs").select("status").eq("id", runId).maybeSingle();
+  const { data, error } = await db.from("review_runs").select("status").eq("id", runId).maybeSingle();
+  if (error) throw new Error(`db: failed to read review status: ${error.message}`);
   return (data?.status as string | undefined) ?? null;
 }
 
@@ -964,7 +970,7 @@ function monthlyQuotaFor(plan: OrgPlan, seats: number): number {
  * LLM spend (private-repo gate, quota gate itself) via `blocked_reason IS NULL`, so a
  * blocked attempt never counts against the very quota that blocked it.
  */
-async function countMonthlyReviews(db: SupabaseClient, orgId: string, periodStart: Date, periodEnd: Date): Promise<number> {
+async function countMonthlyReviews(db: SupabaseClient, orgId: string, periodStart: Date, periodEnd: Date, excludeRunId?: string): Promise<number> {
   const { data: repoRows } = await db.from("repos").select("id").eq("org_id", orgId);
   const repoIds = (repoRows ?? []).map((r) => r.id as string);
   if (repoIds.length === 0) return 0;
@@ -973,21 +979,24 @@ async function countMonthlyReviews(db: SupabaseClient, orgId: string, periodStar
   const prIds = (prRows ?? []).map((p) => p.id as string);
   if (prIds.length === 0) return 0;
 
-  const { data: runRows } = await db
+  let runQuery = db
     .from("review_runs")
-    .select("status, llm_cost_usd")
+    .select("status, llm_cost_usd, delivery_started_at")
     .in("pr_id", prIds)
     .is("blocked_reason", null)
-    .gte("started_at", periodStart.toISOString())
-    .lt("started_at", periodEnd.toISOString());
+    .gte("quota_reserved_at", periodStart.toISOString())
+    .lt("quota_reserved_at", periodEnd.toISOString());
+  if (excludeRunId) runQuery = runQuery.neq("id", excludeRunId);
+  const { data: runRows, error: usageError } = await runQuery;
+  if (usageError) throw new Error("db: failed to read review usage: " + usageError.message);
 
   // A run that failed with zero LLM spend (crashed before/without ever making a model
   // call — misconfiguration, a bug, a transient provider outage before the first request)
   // never actually cost anything and shouldn't consume the org's quota either — same
   // fairness principle as the blocked_reason exclusion above, just for failures that
   // happen after the gate instead of before it.
-  return ((runRows ?? []) as { status: string; llm_cost_usd: number | null }[]).filter(
-    (r) => r.status !== "failed" || Number(r.llm_cost_usd ?? 0) > 0,
+  return ((runRows ?? []) as { status: string; llm_cost_usd: number | null; delivery_started_at?: string | null }[]).filter(
+    (r) => r.status !== "failed" || Number(r.llm_cost_usd ?? 0) > 0 || Boolean(r.delivery_started_at),
   ).length;
 }
 
@@ -1001,11 +1010,11 @@ export function formatUsageLimitMessage(usage: OrgUsage): string {
  * once exceeded). Self-hosted deployments (SELF_HOSTED=true) are always unlimited: that
  * org brings its own LLM keys/infra, so there's no shared cost for Scrutinye to protect.
  */
-export async function getOrgUsage(db: SupabaseClient, orgId: string): Promise<OrgUsage> {
+export async function getOrgUsage(db: SupabaseClient, orgId: string, excludeRunId?: string): Promise<OrgUsage> {
   const [plan, seats] = await Promise.all([getOrgPlan(db, orgId), getOrgSeatLimit(db, orgId)]);
   const periodStart = startOfMonthUtc();
   const periodEnd = startOfNextMonthUtc(periodStart);
-  const used = await countMonthlyReviews(db, orgId, periodStart, periodEnd);
+  const used = await countMonthlyReviews(db, orgId, periodStart, periodEnd, excludeRunId);
 
   if (env().SELF_HOSTED) {
     return {
@@ -1060,4 +1069,10 @@ export async function insertContactSubmission(
 ): Promise<void> {
   const { error } = await db.from("contact_submissions").insert(fields);
   if (error) throw new Error(`db: failed to save contact submission: ${error.message}`);
+}
+
+/** Release a claimed delivery when handling failed, so a provider retry can attempt it again. */
+export async function releaseDelivery(db: SupabaseClient, platform: string, deliveryId: string): Promise<void> {
+  const { error } = await db.from("webhook_deliveries").delete().eq("platform", platform).eq("delivery_id", deliveryId);
+  if (error) throw new Error(`db: failed to release webhook delivery: ${error.message}`);
 }

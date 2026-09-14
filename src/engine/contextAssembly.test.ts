@@ -72,3 +72,12 @@ describe("assembleContext", () => {
     expect(ctx.files).toHaveLength(1); // diff/file fetch still succeeded
   });
 });
+
+it("applies ignored paths before they consume the source-file limit", async () => {
+  const adapter = fakeAdapter();
+  adapter.getDiff = async () => [...Array.from({ length: 25 }, (_, n) => DIFF_TEXT.replaceAll("src/auth.ts", "generated/file" + n + ".ts")), DIFF_TEXT].join("\n");
+  const getFile = vi.spyOn(adapter, "getFile");
+  const ctx = await assembleContext(adapter, PR_REF, "base", "head", undefined, ["generated/**"]);
+  expect(ctx.files.map(file => file.path)).toEqual(["src/auth.ts"]);
+  expect(getFile).toHaveBeenCalledTimes(1);
+});

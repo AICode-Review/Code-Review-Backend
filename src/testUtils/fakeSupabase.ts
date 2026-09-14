@@ -15,7 +15,7 @@ export type FakeTables = Record<string, Record<string, unknown>[]>;
 interface PendingOp {
   table: string;
   op: "select" | "insert" | "update" | "upsert";
-  filters: { col: string; val: unknown; kind: "eq" | "neq" | "in" | "not_null" | "is_null" | "gte" | "lt" }[];
+  filters: { col: string; val: unknown; kind: "eq" | "neq" | "in" | "not_null" | "is_null" | "gte" | "gt" | "lt" }[];
   payload?: Record<string, unknown> | Record<string, unknown>[];
   onConflict?: string;
   order?: { col: string; ascending: boolean };
@@ -40,6 +40,7 @@ function matchesFilters(row: Record<string, unknown>, filters: PendingOp["filter
     if (f.kind === "not_null") return row[f.col] !== null && row[f.col] !== undefined;
     if (f.kind === "is_null") return row[f.col] === null || row[f.col] === undefined;
     if (f.kind === "gte") return (row[f.col] as string | number) >= (f.val as string | number);
+    if (f.kind === "gt") return (row[f.col] as string | number) > (f.val as string | number);
     if (f.kind === "lt") return (row[f.col] as string | number) < (f.val as string | number);
     return Array.isArray(f.val) && f.val.includes(row[f.col]);
   });
@@ -80,6 +81,10 @@ class FakeBuilder implements PromiseLike<{ data: unknown; error: null; count?: n
   }
   gte(col: string, val: unknown): this {
     this.state.filters.push({ col, val, kind: "gte" });
+    return this;
+  }
+  gt(col: string, val: unknown): this {
+    this.state.filters.push({ col, val, kind: "gt" });
     return this;
   }
   lt(col: string, val: unknown): this {
@@ -142,6 +147,7 @@ class FakeBuilder implements PromiseLike<{ data: unknown; error: null; count?: n
         id: randomUUID(),
         ...(table === "review_runs" ? { started_at: new Date().toISOString() } : {}),
         ...item,
+        ...(table === "review_runs" && item.status === "running" ? { quota_reserved_at: new Date().toISOString() } : {}),
       }));
       rows.push(...inserted);
       return { data: inserted, error: null };
@@ -149,7 +155,7 @@ class FakeBuilder implements PromiseLike<{ data: unknown; error: null; count?: n
 
     if (op === "update") {
       const targets = rows.filter((r) => matchesFilters(r, filters));
-      for (const t of targets) Object.assign(t, payload);
+      for (const t of targets) { Object.assign(t, payload); if (table === "review_runs" && t.status === "running") t.quota_reserved_at ??= new Date().toISOString(); }
       return { data: targets, error: null };
     }
 

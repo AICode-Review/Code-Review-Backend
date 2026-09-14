@@ -13,7 +13,7 @@ export interface VerifyOutcome {
   method: "static" | "cross_exam" | "execution";
   verifiedHow: string;
   costUsd: number;
-  /** Anthropic: repro-gen (when needsExecution). OpenAI: skeptic cross-exam. */
+  /** Actual provider attribution, including single-provider fallback. */
   anthropicCostUsd: number;
   openaiCostUsd: number;
   inputTokens: number;
@@ -25,6 +25,8 @@ export interface VerifyOutcome {
    * it was re-run and the defect still reproduced. Omitted whenever the check wasn't attempted
    * (no sandbox, no fix, no fixedTestCode) — that is NOT the same as "failed". */
   fixVerified?: "confirmed" | "failed";
+  /** Verification could not complete; this is not evidence that a candidate is false. */
+  incomplete?: boolean;
 }
 
 interface Usage {
@@ -163,20 +165,20 @@ export async function verifyFinding(
     }
   }
 
-  // Cross-exam → OpenAI skeptic; repro-gen → Anthropic mid (same vendor as specialist passes).
+  // Attribute charges to the provider actually used, including router fallback.
   const usage = sumUsage(
     {
       costUsd: crossExam.costUsd,
-      anthropicCostUsd: 0,
-      openaiCostUsd: crossExam.costUsd,
+      anthropicCostUsd: crossExam.provider === "anthropic" ? crossExam.costUsd : 0,
+      openaiCostUsd: crossExam.provider === "openai" ? crossExam.costUsd : 0,
       inputTokens: crossExam.inputTokens,
       outputTokens: crossExam.outputTokens,
     },
     repro
       ? {
           costUsd: repro.costUsd,
-          anthropicCostUsd: repro.costUsd,
-          openaiCostUsd: 0,
+          anthropicCostUsd: repro.provider === "anthropic" ? repro.costUsd : 0,
+          openaiCostUsd: repro.provider === "openai" ? repro.costUsd : 0,
           inputTokens: repro.inputTokens,
           outputTokens: repro.outputTokens,
         }
@@ -203,6 +205,7 @@ export async function verifyFinding(
     return {
       status: "rejected",
       method: "cross_exam",
+      incomplete: true,
       verifiedHow: "Cross-examination response could not be parsed — no confirming signal, so this was not posted.",
       ...usage,
     };

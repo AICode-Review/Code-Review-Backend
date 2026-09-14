@@ -15,6 +15,7 @@ async function loadPrompt(): Promise<string> {
 export interface ReproGenCallResult {
   data: ReproGenOutput | null;
   costUsd: number;
+  provider: "anthropic" | "openai";
   inputTokens: number;
   outputTokens: number;
 }
@@ -51,5 +52,5 @@ export async function generateRepro(router: LlmRouter, candidate: Candidate, fil
     maxTokens: 2048,
   });
 
-  return { data: result.data, costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+  return { data: result.data, provider: result.provider, costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
 }

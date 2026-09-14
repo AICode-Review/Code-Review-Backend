@@ -24,15 +24,28 @@ vi.mock("../engine/dependencyScan.js", () => ({
   DEPENDENCY_SCAN_PASS: "dependency-scan",
 }));
 
-
 const sendMailMock = vi.fn();
-const createTransportMock = vi.fn((_options: unknown) => ({ sendMail: sendMailMock }));
+const createTransportMock = vi.fn((_options: unknown) => ({
+  sendMail: sendMailMock,
+}));
 vi.mock("nodemailer", () => ({
-  default: { createTransport: (options: unknown) => createTransportMock(options) },
+  default: {
+    createTransport: (options: unknown) => createTransportMock(options),
+  },
 }));
 
+const EMPTY_PASSES = {
+  "pass.logic": { candidates: [] },
+  "pass.security": { candidates: [] },
+  "pass.contracts": { candidates: [] },
+  "pass.concurrency": { candidates: [] },
+  "pass.errors": { candidates: [] },
+  "pass.tests": { candidates: [] },
+  "pass.performance": { candidates: [] },
+};
 
-const NEW_FILE = "export function login(req) {\n  const token = req.headers.authorization;\n  return token;\n}\n";
+const NEW_FILE =
+  "export function login(req) {\n  const token = req.headers.authorization;\n  return token;\n}\n";
 
 const DIFF_TEXT = `diff --git a/src/auth.ts b/src/auth.ts
 index 111..222 100644
@@ -51,19 +64,32 @@ const SECURITY_CANDIDATE = {
   startLine: 2,
   endLine: 2,
   title: "Authorization header used without validation",
-  explanation: "The raw authorization header is read directly with no format or presence check.",
-  whyItMatters: "An attacker can send a malformed or empty header and reach downstream logic unauthenticated.",
+  explanation:
+    "The raw authorization header is read directly with no format or presence check.",
+  whyItMatters:
+    "An attacker can send a malformed or empty header and reach downstream logic unauthenticated.",
   impact: "Potential auth bypass.",
-  fixSteps: ["Validate the header exists and matches the expected scheme before using it."],
+  fixSteps: [
+    "Validate the header exists and matches the expected scheme before using it.",
+  ],
   severity: "critical" as const,
   confidence: 0.9,
   needsExecution: false,
   evidence: ["const token = req.headers.authorization;"],
 };
 
-function fakeAdapter(calls: { postSummary: number; postLineComment: number; setStatus: number }): PlatformAdapter {
+function fakeAdapter(calls: {
+  postSummary: number;
+  postLineComment: number;
+  setStatus: number;
+}): PlatformAdapter {
   return {
-    getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+    getPrInfo: async () => ({
+      headSha: "head-sha",
+      title: "Add login",
+      author: "octocat",
+      baseSha: "base-sha",
+    }),
     getDiff: async () => DIFF_TEXT,
     getFile: async () => NEW_FILE,
     listOwnComments: async () => [],
@@ -107,11 +133,19 @@ describe("handleReviewRun (orchestrator)", () => {
   it("includes the AI-generated walkthrough in the posted summary comment", async () => {
     const { client: db } = createFakeSupabase();
     const router = createFakeRouter({
-      "pass.walkthrough": { summary: "Reads the authorization header directly without validating it." },
+      "pass.walkthrough": {
+        summary:
+          "Reads the authorization header directly without validating it.",
+      },
     });
     let summaryBody = "";
     const adapter: PlatformAdapter = {
-      getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+      getPrInfo: async () => ({
+        headSha: "head-sha",
+        title: "Add login",
+        author: "octocat",
+        baseSha: "base-sha",
+      }),
       getDiff: async () => DIFF_TEXT,
       getFile: async () => NEW_FILE,
       listOwnComments: async () => [],
@@ -128,17 +162,26 @@ describe("handleReviewRun (orchestrator)", () => {
 
     await handleReviewRun(job(), { db, adapter, router });
 
-    expect(summaryBody).toContain("Reads the authorization header directly without validating it.");
+    expect(summaryBody).toContain(
+      "Reads the authorization header directly without validating it.",
+    );
     // Appears before the risk line, matching delivery.ts's ordering.
-    expect(summaryBody.indexOf("Reads the authorization header")).toBeLessThan(summaryBody.indexOf("Risk:"));
+    expect(summaryBody.indexOf("Reads the authorization header")).toBeLessThan(
+      summaryBody.indexOf("Risk:"),
+    );
   });
 
   it("omits the walkthrough section when the model's response fails schema validation, without failing the run", async () => {
     const { client: db, tables } = createFakeSupabase();
-    const router = createFakeRouter({}); // no pass.walkthrough configured — fails validation, data: null
+    const router = createFakeRouter(EMPTY_PASSES); // no walkthrough, but specialist checks succeed
     let summaryBody = "";
     const adapter: PlatformAdapter = {
-      getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+      getPrInfo: async () => ({
+        headSha: "head-sha",
+        title: "Add login",
+        author: "octocat",
+        baseSha: "base-sha",
+      }),
       getDiff: async () => DIFF_TEXT,
       getFile: async () => NEW_FILE,
       listOwnComments: async () => [],
@@ -162,11 +205,18 @@ describe("handleReviewRun (orchestrator)", () => {
   it("includes the AI-generated Mermaid diagram for a GitHub PR", async () => {
     const { client: db } = createFakeSupabase();
     const router = createFakeRouter({
-      "pass.diagram": { mermaid: "flowchart TD\n  A[auth.ts] -->|modifies| B[login()]" },
+      "pass.diagram": {
+        mermaid: "flowchart TD\n  A[auth.ts] -->|modifies| B[login()]",
+      },
     });
     let summaryBody = "";
     const adapter: PlatformAdapter = {
-      getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+      getPrInfo: async () => ({
+        headSha: "head-sha",
+        title: "Add login",
+        author: "octocat",
+        baseSha: "base-sha",
+      }),
       getDiff: async () => DIFF_TEXT,
       getFile: async () => NEW_FILE,
       listOwnComments: async () => [],
@@ -192,11 +242,18 @@ describe("handleReviewRun (orchestrator)", () => {
     // pass.diagram IS configured — if the diagram were (wrongly) generated for Bitbucket,
     // this would prove it by appearing in the summary. It must not.
     const router = createFakeRouter({
-      "pass.diagram": { mermaid: "flowchart TD\n  A[auth.ts] -->|modifies| B[login()]" },
+      "pass.diagram": {
+        mermaid: "flowchart TD\n  A[auth.ts] -->|modifies| B[login()]",
+      },
     });
     let summaryBody = "";
     const adapter: PlatformAdapter = {
-      getPrInfo: async () => ({ headSha: "head-sha", title: "Add login", author: "octocat", baseSha: "base-sha" }),
+      getPrInfo: async () => ({
+        headSha: "head-sha",
+        title: "Add login",
+        author: "octocat",
+        baseSha: "base-sha",
+      }),
       getDiff: async () => DIFF_TEXT,
       getFile: async () => NEW_FILE,
       listOwnComments: async () => [],
@@ -211,7 +268,13 @@ describe("handleReviewRun (orchestrator)", () => {
       setStatus: async () => {},
     } as unknown as PlatformAdapter;
 
-    const bitbucketJob = { ...job(), pr: { ...job().pr, repo: { ...job().pr.repo, platform: "bitbucket" as const } } };
+    const bitbucketJob = {
+      ...job(),
+      pr: {
+        ...job().pr,
+        repo: { ...job().pr.repo, platform: "bitbucket" as const },
+      },
+    };
     await handleReviewRun(bitbucketJob, { db, adapter, router });
 
     expect(summaryBody).not.toContain("Change diagram");
@@ -222,7 +285,10 @@ describe("handleReviewRun (orchestrator)", () => {
     const { client: db, tables } = createFakeSupabase();
     const router = createFakeRouter({
       "pass.security": { candidates: [SECURITY_CANDIDATE] },
-      "verify.cross_exam": { verdict: "upheld", reasoning: "Confirmed: header is used unvalidated at that line." },
+      "verify.cross_exam": {
+        verdict: "upheld",
+        reasoning: "Confirmed: header is used unvalidated at that line.",
+      },
     });
     const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
     const adapter = fakeAdapter(calls);
@@ -277,19 +343,26 @@ describe("handleReviewRun (orchestrator)", () => {
     expect(runs[0]?.["error"]).toMatch(/private/i);
 
     const auditRows = tables["audit_log"] ?? [];
-    expect(auditRows.some((r) => r["action"] === "review.blocked_by_plan")).toBe(true);
+    expect(
+      auditRows.some((r) => r["action"] === "review.blocked_by_plan"),
+    ).toBe(true);
   });
 
   it("never runs a review once the org's monthly review quota is exhausted", async () => {
     process.env["FREE_MONTHLY_REVIEW_QUOTA"] = "1";
     vi.resetModules(); // config.ts memoizes env() at module scope — force a fresh read for this test.
     try {
-      const { handleReviewRun: freshHandleReviewRun } = await import("./reviewRun.js");
-      const { createFakeSupabase: freshCreateFakeSupabase } = await import("../testUtils/fakeSupabase.js");
-      const { createFakeRouter: freshCreateFakeRouter } = await import("../llm/fakeRouter.js");
+      const { handleReviewRun: freshHandleReviewRun } =
+        await import("./reviewRun.js");
+      const { createFakeSupabase: freshCreateFakeSupabase } =
+        await import("../testUtils/fakeSupabase.js");
+      const { createFakeRouter: freshCreateFakeRouter } =
+        await import("../llm/fakeRouter.js");
 
       const { client: db, tables } = freshCreateFakeSupabase();
       const router = freshCreateFakeRouter({
+        ...EMPTY_PASSES,
+        ...EMPTY_PASSES,
         "pass.security": { candidates: [SECURITY_CANDIDATE] },
         "verify.cross_exam": { verdict: "upheld", reasoning: "x" },
       });
@@ -313,7 +386,9 @@ describe("handleReviewRun (orchestrator)", () => {
       expect(String(runs[1]?.["error"])).toMatch(/monthly review limit/i);
 
       const auditRows = tables["audit_log"] ?? [];
-      expect(auditRows.some((r) => r["action"] === "review.blocked_by_quota")).toBe(true);
+      expect(
+        auditRows.some((r) => r["action"] === "review.blocked_by_quota"),
+      ).toBe(true);
     } finally {
       delete process.env["FREE_MONTHLY_REVIEW_QUOTA"];
       vi.resetModules();
@@ -324,7 +399,12 @@ describe("handleReviewRun (orchestrator)", () => {
     const { client: db, tables } = createFakeSupabase();
     const router = createFakeRouter({
       "pass.security": {
-        candidates: [{ ...SECURITY_CANDIDATE, evidence: ["this text does not appear anywhere in the file"] }],
+        candidates: [
+          {
+            ...SECURITY_CANDIDATE,
+            evidence: ["this text does not appear anywhere in the file"],
+          },
+        ],
       },
       "verify.cross_exam": { verdict: "upheld", reasoning: "x" },
     });
@@ -344,9 +424,17 @@ describe("handleReviewRun (orchestrator)", () => {
     const { client: db, tables } = createFakeSupabase();
     const router = createFakeRouter({
       "pass.security": {
-        candidates: [{ ...SECURITY_CANDIDATE, suggestedFix: "// TODO: validate the header properly" }],
+        candidates: [
+          {
+            ...SECURITY_CANDIDATE,
+            suggestedFix: "// TODO: validate the header properly",
+          },
+        ],
       },
-      "verify.cross_exam": { verdict: "upheld", reasoning: "Confirmed: header is used unvalidated at that line." },
+      "verify.cross_exam": {
+        verdict: "upheld",
+        reasoning: "Confirmed: header is used unvalidated at that line.",
+      },
     });
     const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
     const adapter = fakeAdapter(calls);
@@ -369,7 +457,8 @@ index 111..222 100644
  export const region = "us-east-1";
 +export const awsKey = "AKIAABCDEFGHIJKLMNOP";
 `;
-    const secretFile = 'export const region = "us-east-1";\nexport const awsKey = "AKIAABCDEFGHIJKLMNOP";\n';
+    const secretFile =
+      'export const region = "us-east-1";\nexport const awsKey = "AKIAABCDEFGHIJKLMNOP";\n';
 
     const { client: db, tables } = createFakeSupabase();
     // No pass configured to return anything (every LLM pass yields zero candidates) — proves
@@ -377,7 +466,12 @@ index 111..222 100644
     const router = createFakeRouter({});
     const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
     const adapter: PlatformAdapter = {
-      getPrInfo: async () => ({ headSha: "head-sha", title: "Add region config", author: "octocat", baseSha: "base-sha" }),
+      getPrInfo: async () => ({
+        headSha: "head-sha",
+        title: "Add region config",
+        author: "octocat",
+        baseSha: "base-sha",
+      }),
       getDiff: async () => secretDiff,
       getFile: async () => secretFile,
       listOwnComments: async () => [],
@@ -425,9 +519,11 @@ index 111..222 100644
         path: "package.json",
         startLine: 2,
         endLine: 2,
-        title: 'lodash@4.17.20 has a published vulnerability (GHSA-test-1234)',
-        explanation: "npm package \"lodash\" is being pinned to a version OSV.dev lists as vulnerable.",
-        whyItMatters: "Shipping this version means the vulnerability is present the moment this PR merges.",
+        title: "lodash@4.17.20 has a published vulnerability (GHSA-test-1234)",
+        explanation:
+          'npm package "lodash" is being pinned to a version OSV.dev lists as vulnerable.',
+        whyItMatters:
+          "Shipping this version means the vulnerability is present the moment this PR merges.",
         impact: "Treat as exploitable until confirmed otherwise.",
         fixSteps: ["Bump to a patched version."],
         severity: "critical",
@@ -443,7 +539,12 @@ index 111..222 100644
     const router = createFakeRouter({});
     const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
     const adapter: PlatformAdapter = {
-      getPrInfo: async () => ({ headSha: "head-sha", title: "Bump lodash", author: "octocat", baseSha: "base-sha" }),
+      getPrInfo: async () => ({
+        headSha: "head-sha",
+        title: "Bump lodash",
+        author: "octocat",
+        baseSha: "base-sha",
+      }),
       getDiff: async () => depDiff,
       getFile: async () => depFile,
       listOwnComments: async () => [],
@@ -489,10 +590,14 @@ index 111..222 100644
     createTransportMock.mockClear();
     sendMailMock.mockResolvedValue({});
     try {
-      const { handleReviewRun: freshHandleReviewRun } = await import("./reviewRun.js");
-      const { createFakeSupabase: freshCreateFakeSupabase } = await import("../testUtils/fakeSupabase.js");
-      const { createFakeRouter: freshCreateFakeRouter } = await import("../llm/fakeRouter.js");
-      const { upsertPrChain: freshUpsertPrChain } = await import("../db/repositories.js");
+      const { handleReviewRun: freshHandleReviewRun } =
+        await import("./reviewRun.js");
+      const { createFakeSupabase: freshCreateFakeSupabase } =
+        await import("../testUtils/fakeSupabase.js");
+      const { createFakeRouter: freshCreateFakeRouter } =
+        await import("../llm/fakeRouter.js");
+      const { upsertPrChain: freshUpsertPrChain } =
+        await import("../db/repositories.js");
 
       const { client: db, tables } = freshCreateFakeSupabase();
 
@@ -500,13 +605,25 @@ index 111..222 100644
       // does — matches on external_id, so this is a no-op duplicate, not a second row)
       // so the owner can be seeded against a real orgId before the run happens.
       const testJob = job();
-      const { orgId } = await freshUpsertPrChain(db, testJob.pr, testJob.headSha);
-      tables["users"] = [{ id: "user-owner", email: "owner@acme.dev", handle: "owner-dev" }];
-      tables["org_members"] = [{ org_id: orgId, user_id: "user-owner", role: "owner" }];
+      const { orgId } = await freshUpsertPrChain(
+        db,
+        testJob.pr,
+        testJob.headSha,
+      );
+      tables["users"] = [
+        { id: "user-owner", email: "owner@acme.dev", handle: "owner-dev" },
+      ];
+      tables["org_members"] = [
+        { org_id: orgId, user_id: "user-owner", role: "owner" },
+      ];
 
       const router = freshCreateFakeRouter({
+        ...EMPTY_PASSES,
         "pass.security": { candidates: [SECURITY_CANDIDATE] },
-        "verify.cross_exam": { verdict: "upheld", reasoning: "Confirmed: header is used unvalidated at that line." },
+        "verify.cross_exam": {
+          verdict: "upheld",
+          reasoning: "Confirmed: header is used unvalidated at that line.",
+        },
       });
       const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
       const adapter = fakeAdapter(calls);
@@ -514,7 +631,11 @@ index 111..222 100644
       await freshHandleReviewRun(testJob, { db, adapter, router });
 
       expect(sendMailMock).toHaveBeenCalledTimes(1);
-      const sent = sendMailMock.mock.calls[0]![0] as { to: string; subject: string; html: string };
+      const sent = sendMailMock.mock.calls[0]![0] as {
+        to: string;
+        subject: string;
+        html: string;
+      };
       expect(sent.to).toBe("owner@acme.dev");
       expect(sent.subject).toContain("widgets");
       expect(sent.html).toContain("https://app.scrutinye.dev/runs/");
@@ -562,9 +683,19 @@ index 111..222 100644
     await handleReviewRun(job(), { db, adapter, router });
 
     expect(spy).toHaveBeenCalledTimes(1);
-    const sandboxOverride = spy.mock.calls[0]?.[3] as (() => Promise<{ available: boolean; reproduced: boolean; output: string }>) | undefined;
+    const sandboxOverride = spy.mock.calls[0]?.[3] as
+      | (() => Promise<{
+          available: boolean;
+          reproduced: boolean;
+          output: string;
+        }>)
+      | undefined;
     expect(sandboxOverride).toBeTypeOf("function");
-    await expect(sandboxOverride!()).resolves.toEqual({ available: false, reproduced: false, output: "" });
+    await expect(sandboxOverride!()).resolves.toEqual({
+      available: false,
+      reproduced: false,
+      output: "",
+    });
     spy.mockRestore();
   });
 
@@ -573,7 +704,9 @@ index 111..222 100644
     const { client: db, tables } = createFakeSupabase();
     const testJob = job();
     const { orgId } = await upsertPrChain(db, testJob.pr, testJob.headSha);
-    tables["subscriptions"] = [{ org_id: orgId, tier: "pro", status: "active", seats: 1 }];
+    tables["subscriptions"] = [
+      { org_id: orgId, tier: "pro", status: "active", seats: 1 },
+    ];
 
     const router = createFakeRouter({
       "pass.security": { candidates: [SECURITY_CANDIDATE] },
@@ -588,4 +721,194 @@ index 111..222 100644
     expect(spy.mock.calls[0]?.[3]).toBeUndefined(); // undefined = verifyFinding's own real default (runInSandbox)
     spy.mockRestore();
   });
+});
+
+describe("review reliability regressions", () => {
+  function setup(
+    responses: Parameters<typeof createFakeRouter>[0] = EMPTY_PASSES,
+  ) {
+    const { client: db, tables } = createFakeSupabase();
+    const calls = { postSummary: 0, postLineComment: 0, setStatus: 0 };
+    const adapter = fakeAdapter(calls);
+    const status = vi.spyOn(adapter, "setStatus");
+    return {
+      db,
+      tables,
+      adapter,
+      status,
+      calls,
+      router: createFakeRouter(responses),
+    };
+  }
+  it("never gives a clean check when all analysis providers fail", async () => {
+    const t = setup({});
+    await handleReviewRun(job(), t);
+    expect(t.status).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ state: "neutral", title: "Review incomplete" }),
+    );
+    expect(t.tables.review_runs?.[0]?.error).toContain("Analysis unavailable");
+    expect(t.tables.review_runs?.[0]?.summary).toContain(
+      "undetermined (incomplete review)",
+    );
+  });
+  it("retains a clean success when every specialist check succeeds", async () => {
+    const t = setup();
+    await handleReviewRun(job(), t);
+    expect(t.status).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ state: "success" }),
+    );
+    expect(t.tables.review_runs?.[0]?.error).toBeNull();
+  });
+  it("reports missing source rather than a clean review", async () => {
+    const t = setup();
+    t.adapter.getFile = async () => {
+      throw new Error("platform unavailable");
+    };
+    await handleReviewRun(job(), t);
+    expect(t.tables.review_runs?.[0]?.error).toContain(
+      "Full source was unavailable",
+    );
+    expect(t.status).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ state: "neutral" }),
+    );
+  });
+  it("reports failed verification separately from a refuted candidate", async () => {
+    const t = setup({
+      ...EMPTY_PASSES,
+      "pass.security": { candidates: [SECURITY_CANDIDATE] },
+    });
+    await handleReviewRun(job(), t);
+    expect(t.tables.review_runs?.[0]?.error).toContain(
+      "Verification unavailable for 1 candidate",
+    );
+    expect(t.calls.postLineComment).toBe(0);
+    expect(t.status).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ state: "neutral" }),
+    );
+  });
+  it("discloses candidates that could not be verified within the budget", async () => {
+    const t = setup({
+      ...EMPTY_PASSES,
+      "pass.security": { candidates: [SECURITY_CANDIDATE] },
+    });
+    const complete = t.router.complete;
+    t.router.complete = async (request) => ({
+      ...(await complete(request)),
+      costUsd: 100,
+    });
+    await handleReviewRun(job(), t);
+    expect(t.tables.review_runs?.[0]?.error).toContain(
+      "Verification skipped for 1 candidate",
+    );
+    expect(t.status).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ state: "neutral" }),
+    );
+  });
+  it("fails rather than completing when findings cannot be persisted", async () => {
+    const t = setup({
+      ...EMPTY_PASSES,
+      "pass.security": { candidates: [SECURITY_CANDIDATE] },
+      "verify.cross_exam": { verdict: "upheld", reasoning: "Confirmed" },
+    });
+    const from = t.db.from.bind(t.db);
+    vi.spyOn(t.db, "from").mockImplementation((table) =>
+      table === "findings"
+        ? ({
+            insert: async () => ({ error: { message: "storage unavailable" } }),
+          } as never)
+        : from(table),
+    );
+    await expect(handleReviewRun(job(), t)).rejects.toThrow(
+      "failed to persist findings",
+    );
+    expect(t.tables.review_runs?.[0]?.status).toBe("failed");
+    expect(t.tables.review_runs?.[0]?.llm_cost_usd).toBeGreaterThan(0);
+    expect(t.status).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ state: "failure" }),
+    );
+  });
+  it("fails rather than publishing a success when the completion write fails", async () => {
+    const t = setup();
+    const from = t.db.from.bind(t.db);
+    vi.spyOn(t.db, "from").mockImplementation((table) => {
+      const builder = from(table);
+      if (table === "review_runs") {
+        const update = builder.update.bind(builder);
+        builder.update = ((payload: Record<string, unknown>) =>
+          payload.status === "completed"
+            ? {
+                eq() {
+                  return this;
+                },
+                select() {
+                  return this;
+                },
+                maybeSingle: async () => ({
+                  data: null,
+                  error: { message: "write unavailable" },
+                }),
+              }
+            : update(payload)) as typeof builder.update;
+      }
+      return builder;
+    });
+    await expect(handleReviewRun(job(), t)).rejects.toThrow(
+      "failed to complete review_run",
+    );
+    expect(t.tables.review_runs?.[0]?.status).toBe("failed");
+    expect(t.status).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ state: "success" }),
+    );
+  });
+  it.each([false, true])(
+    "preserves cancellation during summary delivery (provider failure: %s)",
+    async (providerFails) => {
+      const t = setup();
+      t.adapter.postSummary = async () => {
+        t.tables.review_runs![0]!.status = "cancelled";
+        if (providerFails)
+          throw new Error("provider failed after cancellation");
+        return "summary-1";
+      };
+      await handleReviewRun(job(), t);
+      expect(t.tables.review_runs?.[0]?.status).toBe("cancelled");
+      expect(t.status).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ state: "success" }),
+      );
+      expect(t.status).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ state: "failure" }),
+      );
+    },
+  );
+  it("records an early platform failure on an existing queued run", async () => {
+    const t = setup();
+    t.tables.review_runs = [{ id: "queued-1", status: "queued" }];
+    t.adapter.getPrInfo = async () => {
+      throw new Error("provider down");
+    };
+    await expect(
+      handleReviewRun({ ...job(), runId: "queued-1" }, t),
+    ).rejects.toThrow("provider down");
+    expect(t.tables.review_runs[0]?.status).toBe("failed");
+  });
+  it.each(["completed", "failed", "cancelled", "running"])(
+    "does not re-execute an existing %s run",
+    async (status) => {
+      const t = setup();
+      t.tables.review_runs = [{ id: "existing-1", status }];
+      const info = vi.spyOn(t.adapter, "getPrInfo");
+      await handleReviewRun({ ...job(), runId: "existing-1" }, t);
+      expect(info).not.toHaveBeenCalled();
+      expect(t.calls.postSummary).toBe(0);
+    },
+  );
 });
