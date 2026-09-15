@@ -24,7 +24,7 @@
     "@fastify/cors": "^10.0.1",
     "@fastify/rate-limit": "^10.2.1",
     "@octokit/app": "^15.1.0",
-    "@sentry/node": "^10.67.0",
+    "@sentry/node": "^10.74.0",
     "@supabase/supabase-js": "^2.47.0",
     "concurrently": "^9.1.0",
     "dotenv": "^16.4.5",
