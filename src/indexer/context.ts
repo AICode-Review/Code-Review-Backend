@@ -1,6 +1,22 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { embedTexts } from "./embeddings.js";
 
+// TEMPORARY diagnostic tracing (2026-09-15) — same mechanism used in jobs/reviewRun.ts and
+// engine/contextAssembly.ts. A run got stuck 3.5+ minutes past engine/contextAssembly.ts's own
+// "before_getContext" checkpoint, longer than the embeddings-call fix alone should allow — this
+// pinpoints whether the hang is actually in one of the plain symbols-table queries below
+// (neither has any timeout) rather than (or in addition to) the embedding call. Remove once
+// found and fixed.
+async function markCheckpoint(db: SupabaseClient, traceKey: string, stage: string): Promise<void> {
+  try {
+    await db
+      .from("worker_heartbeats")
+      .upsert({ id: `checkpoint:${traceKey}:getContext:${stage}`, updated_at: new Date().toISOString() });
+  } catch {
+    // best-effort only
+  }
+}
+
 export interface SymbolContext {
   path: string;
   name: string;
@@ -74,11 +90,13 @@ export async function getContext(
   // `.or()` filter-string DSL below from a symbol name containing a comma/period/`%` etc.
   const safeNames = changedSymbolNames.filter((n) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n));
 
+  await markCheckpoint(db, repoId, "0_before_definitions_query");
   const { data: symbolRows } = await db
     .from("symbols")
     .select("path, name, kind, signature, start_line, end_line")
     .eq("repo_id", repoId)
     .in("name", changedSymbolNames.length > 0 ? changedSymbolNames : ["__none__"]);
+  await markCheckpoint(db, repoId, "1_after_definitions_query");
 
   const rows = (symbolRows ?? []) as Record<string, unknown>[];
   const definitions = rows.filter((r) => !isTestPath(r["path"] as string)).map(toSymbolContext);
@@ -107,12 +125,14 @@ export async function getContext(
   let signatureMatchedTests: SymbolContext[] = [];
   if (safeNames.length > 0) {
     try {
+      await markCheckpoint(db, repoId, "2_before_callers_query");
       const { data: callerRows } = await db
         .from("symbols")
         .select("path, name, kind, signature, start_line, end_line")
         .eq("repo_id", repoId)
         .or(safeNames.map((n) => `signature.ilike.%${n}%`).join(","))
         .limit(50);
+      await markCheckpoint(db, repoId, "3_after_callers_query");
       // A row whose own name is one of the changed names is already surfaced via
       // `definitions`/`nameMatchedTests` above — exclude it here so the same
       // declaration doesn't also show up as its own "caller".
@@ -144,14 +164,18 @@ export async function getContext(
   let similarChunks: SimilarChunk[] = [];
   if (similarityQueryText) {
     try {
+      await markCheckpoint(db, repoId, "4_before_embedTexts");
       const { vectors } = await embedTexts([similarityQueryText]);
+      await markCheckpoint(db, repoId, "5_after_embedTexts");
       const queryEmbedding = vectors[0];
       if (queryEmbedding) {
+        await markCheckpoint(db, repoId, "6_before_match_chunks_rpc");
         const { data: matchRows, error } = await db.rpc("match_chunks", {
           p_repo_id: repoId,
           p_query_embedding: queryEmbedding,
           p_match_count: 12,
         });
+        await markCheckpoint(db, repoId, "7_after_match_chunks_rpc");
         if (!error) {
           similarChunks = ((matchRows ?? []) as Record<string, unknown>[]).map((r) => ({
             path: r["path"] as string,
