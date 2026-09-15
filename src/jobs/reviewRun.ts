@@ -83,6 +83,25 @@ function prWebUrl(pr: PrRef): string {
 /** Thrown when a newer push superseded this run — caught below and treated as a clean stop, never a failure. */
 class RunCancelledError extends Error {}
 
+// TEMPORARY diagnostic tracing (2026-09-15): two independent, verified-correct fixes to the
+// LLM call layer (a 90s per-call timeout, then disabling HTTP keep-alive) produced ZERO change
+// in a reproducible indefinite hang — same signature both times (stuck "running", zero
+// cost/candidates, no error). That means the hang is most likely upstream of any LLM call
+// entirely, and guessing at further fixes without real visibility just burns more test cycles.
+// This piggybacks on the existing worker_heartbeats table (already service-role-writable, no
+// migration needed) to record exactly which stage a run reached, queryable directly from
+// Postgres without depending on Render's log UI or a copy-pasted excerpt. Remove once the real
+// hang point is found and fixed.
+async function markCheckpoint(db: SupabaseClient, traceKey: string, stage: string): Promise<void> {
+  try {
+    await db
+      .from("worker_heartbeats")
+      .upsert({ id: `checkpoint:${traceKey}:${stage}`, updated_at: new Date().toISOString() });
+  } catch {
+    // best-effort only — tracing must never affect the run itself
+  }
+}
+
 /**
  * Execution-sandbox verification (Pricing page: Pro+) — degrades exactly like a genuinely
  * unavailable Docker host (verify/sandbox.ts's own `available: false` path), so a free-tier
@@ -140,20 +159,26 @@ export async function handleReviewRun(
   let spentAnthropicUsd = 0;
   let spentOpenaiUsd = 0;
   let completedHere = false;
+  const traceKey = `${job.pr.repo.owner}/${job.pr.repo.name}#${job.pr.number}`;
   try {
+    await markCheckpoint(db, traceKey, "0_handler_entered");
     if (runId && (await getRunStatus(db, runId)) !== "queued") return;
+    await markCheckpoint(db, traceKey, "1_before_getPrInfo");
     // Always fetch authoritative PR info — webhook `command` events arrive with
     // no head sha, and REST-triggered runs need base sha for the diff too.
     const prInfo = await adapter.getPrInfo(job.pr);
+    await markCheckpoint(db, traceKey, "2_got_pr_info");
     const headSha = prInfo.headSha;
     knownHeadSha = headSha;
     const pr = { ...job.pr, title: prInfo.title, author: prInfo.author };
 
     const { orgId, repoId, prId } = await upsertPrChain(db, pr, headSha);
+    await markCheckpoint(db, traceKey, "3_upserted_pr_chain");
 
     // Platform-admin suspend kill-switch — blocks all reviews for the org (webhook + manual + rerun).
     const { getOrgSuspension } = await import("../db/adminRepositories.js");
     const suspension = await getOrgSuspension(db, orgId);
+    await markCheckpoint(db, traceKey, "4_checked_suspension");
     if (suspension.suspended) {
       const message = suspension.suspendedReason
         ? `This organization is suspended: ${suspension.suspendedReason}`
@@ -196,6 +221,7 @@ export async function handleReviewRun(
     // Plan enforcement: free plan is public-repos-only. Blocked before any run row is spun
     // up/spent-on — this is a hard "review never runs," not a partial/degraded one.
     const repoIsPrivate = await isRepoPrivate(db, repoId);
+    await markCheckpoint(db, traceKey, "5_checked_private");
     if (!(await canReviewRepo(db, orgId, repoIsPrivate))) {
       const message =
         "This repo is private, which requires a Pro or Team plan. Upgrade in Settings to enable reviews on it.";
@@ -229,6 +255,7 @@ export async function handleReviewRun(
     // Monthly usage quota (DESIGN.md pricing — hard-block once exceeded). Checked after the
     // private-repo gate so a run blocked there never reaches (or counts against) this one.
     const usage = await getOrgUsage(db, orgId, runId);
+    await markCheckpoint(db, traceKey, "6_checked_usage");
     if (usage.blocked) {
       const message = formatUsageLimitMessage(usage);
       await recordAudit(
@@ -268,6 +295,7 @@ export async function handleReviewRun(
     }
 
     await cancelOtherRunsForPr(db, prId, job.runId);
+    await markCheckpoint(db, traceKey, "7_cancelled_other_runs");
 
     if (runId) {
       const claim = await db
@@ -302,6 +330,7 @@ export async function handleReviewRun(
         );
       runId = run.id as string;
     }
+    await markCheckpoint(db, traceKey, "8_claimed_row");
 
     // Progress checkpoints, not just start/end — a run that never logs the NEXT one again
     // has hung at a specific, locatable point instead of leaving zero trace (2026-09-14:
@@ -309,13 +338,16 @@ export async function handleReviewRun(
     // diagnosing which await never returned took reconstructing timestamps from unrelated
     // request logs, since nothing here logged its own progress).
     console.log(`[reviewRun] ${runId} fetching repo config/rulebook/feedback`);
+    await markCheckpoint(db, traceKey, "9_before_config_fetch");
     const [repoConfig, rulebookRules, priorFeedback] = await Promise.all([
       getRepoConfig(db, repoId),
       getActiveRulebookRules(db, orgId, repoId),
       getPriorFindingFeedback(db, prId, runId),
     ]);
+    await markCheckpoint(db, traceKey, "10_got_config");
 
     console.log(`[reviewRun] ${runId} assembling context (diff + changed files + repo index)`);
+    await markCheckpoint(db, traceKey, "11_before_assembleContext");
     const ctx = await assembleContext(
       adapter,
       pr,
@@ -324,6 +356,7 @@ export async function handleReviewRun(
       { db, repoId },
       repoConfig.ignoredPaths,
     );
+    await markCheckpoint(db, traceKey, "12_after_assembleContext");
     console.log(`[reviewRun] ${runId} context ready — ${ctx.files.length} file(s) fetched, starting specialist passes`);
     const fetchedPaths = new Set(ctx.files.map((file) => file.path));
     const missingFiles = ctx.prDiff.files.filter(
@@ -371,16 +404,21 @@ export async function handleReviewRun(
       },
       walkthrough,
       diagram,
-    ] = await Promise.all([
-      runAllPasses(router, ctx, {
-        rulebook: rulebookRules,
-        costCapUsd: costCap,
-      }),
-      generateWalkthrough(router, ctx.prDiff),
-      wantsDiagram
-        ? generateDiagram(router, ctx.prDiff)
-        : Promise.resolve(NO_DIAGRAM),
-    ]);
+    ] = await (async () => {
+      await markCheckpoint(db, traceKey, "13_before_passes");
+      const result = await Promise.all([
+        runAllPasses(router, ctx, {
+          rulebook: rulebookRules,
+          costCapUsd: costCap,
+        }),
+        generateWalkthrough(router, ctx.prDiff),
+        wantsDiagram
+          ? generateDiagram(router, ctx.prDiff)
+          : Promise.resolve(NO_DIAGRAM),
+      ]);
+      await markCheckpoint(db, traceKey, "14_after_passes");
+      return result;
+    })();
     console.log(`[reviewRun] ${runId} specialist passes complete — ${results.length} candidate(s), verifying`);
     // The walkthrough and diagram are bonus orientation, not specialist passes — neither
     // competes for the pass budget above, but their (typically small) cost still counts
@@ -561,6 +599,7 @@ export async function handleReviewRun(
     }
 
     await throwIfCancelled(db, runId);
+    await markCheckpoint(db, traceKey, "15_after_verify_loop");
 
     const totalCostUsd = passCostUsd + verifyCostUsd;
     const anthropicCostUsd = passAnthropicCostUsd + verifyAnthropicCostUsd;
@@ -600,6 +639,7 @@ export async function handleReviewRun(
         "failed to persist delivery boundary: " + delivery.error.message,
       );
     if (!delivery.data) return;
+    await markCheckpoint(db, traceKey, "16_delivery_started");
     const latestPr = await adapter.getPrInfo(pr);
     if (latestPr.headSha !== headSha) {
       await db
