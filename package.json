@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/copyPrompts.mjs && node scripts/copyMigrations.mjs",
     "start": "node dist/server.js",
     "start:worker": "node dist/worker.js",
-    "start:combined": "concurrently -n server,worker -c blue,magenta \"node dist/server.js\" \"node dist/worker.js\"",
+    "start:combined": "concurrently -k -n server,worker -c blue,magenta \"node dist/server.js\" \"node dist/worker.js\"",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx src/db/migrate.ts"
