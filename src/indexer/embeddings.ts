@@ -10,6 +10,16 @@ export interface EmbedResult {
 
 const BATCH_SIZE = 96; // OpenAI embeddings endpoint accepts an array input — batch to cut request overhead
 
+// Confirmed in production (2026-09-15): this call had no per-call timeout, unlike
+// llm/openaiClient.ts's callOpenAI. It fell back to the SDK's ~10-minute default, and — unlike
+// an external Promise.race-based timeout (which only stops the CALLER from waiting, never
+// actually cancels the underlying HTTP request) — this uses the SDK's own AbortController-based
+// timeout, which genuinely aborts the request. contextAssembly.ts's own 60s withTimeout around
+// the whole getContext() call was not enough on its own: a review run got stuck for 9+ minutes
+// past that 60s bound, with the abandoned embeddings request apparently still occupying
+// resources in the background since nothing had actually cancelled it.
+const EMBED_CALL_TIMEOUT_MS = 20_000;
+
 /**
  * Rate-limit (429) backoff must honor the API's retry-after (seconds, often
  * several) rather than the sub-second jittered backoff used for transient
@@ -20,7 +30,7 @@ const BATCH_SIZE = 96; // OpenAI embeddings endpoint accepts an array input — 
 async function embedBatch(client: OpenAI, model: string, batch: string[], attempts = 5): Promise<OpenAI.Embeddings.CreateEmbeddingResponse> {
   for (let i = 0; i < attempts; i++) {
     try {
-      return await client.embeddings.create({ model, input: batch });
+      return await client.embeddings.create({ model, input: batch }, { timeout: EMBED_CALL_TIMEOUT_MS });
     } catch (err) {
       const isRateLimit = err instanceof OpenAI.APIError && err.status === 429;
       if (!isRateLimit || i === attempts - 1) throw err;
