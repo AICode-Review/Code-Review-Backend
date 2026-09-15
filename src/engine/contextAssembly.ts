@@ -48,6 +48,22 @@ async function withTimeoutOrThrow<T>(promise: Promise<T>, ms: number, label: str
   return result;
 }
 
+// TEMPORARY diagnostic tracing (2026-09-15), same mechanism as jobs/reviewRun.ts's
+// markCheckpoint — a run got stuck for 8+ minutes between reviewRun.ts's own "before
+// assembleContext" and "after assembleContext" checkpoints, well past every timeout inside
+// this function, so this pinpoints exactly which internal step (getDiff, the per-file fetch
+// loop, or the repo-index lookup) is the one actually stuck. Remove once found and fixed.
+async function markCheckpoint(db: SupabaseClient | undefined, traceKey: string, stage: string): Promise<void> {
+  if (!db) return;
+  try {
+    await db
+      .from("worker_heartbeats")
+      .upsert({ id: `checkpoint:${traceKey}:assembleContext:${stage}`, updated_at: new Date().toISOString() });
+  } catch {
+    // best-effort only
+  }
+}
+
 /**
  * DESIGN.md §6.2: diff + full head content of every changed file, plus
  * (when an indexed repo is available) cross-file context — definitions,
@@ -64,7 +80,10 @@ export async function assembleContext(
   index?: { db: SupabaseClient; repoId: string },
   ignoredPaths: string[] = [],
 ): Promise<ReviewContext> {
+  const traceKey = `${pr.repo.owner}/${pr.repo.name}#${pr.number}`;
+  await markCheckpoint(index?.db, traceKey, "0_start");
   const diffText = await withTimeoutOrThrow(adapter.getDiff(pr), DIFF_FETCH_TIMEOUT_MS, "adapter.getDiff");
+  await markCheckpoint(index?.db, traceKey, "1_after_getDiff");
   const prDiff = buildPrDiff({ baseSha, headSha, diffText });
   prDiff.files = prDiff.files.filter(file => !matchesIgnoredPath(file.path, ignoredPaths));
 
@@ -100,12 +119,15 @@ export async function assembleContext(
       console.warn(`[contextAssembly] failed to fetch ${path} for review — skipping it:`, err);
     }
   }
+  await markCheckpoint(index?.db, traceKey, "2_after_file_loop");
 
   let repoContext: RepoContext | null = null;
   let repoContextTimedOut = false;
   if (index) {
     try {
+      await markCheckpoint(index?.db, traceKey, "3_before_extractChangedSymbols");
       const { names, similarityQueryText } = await extractChangedSymbols(prDiff, files);
+      await markCheckpoint(index?.db, traceKey, "4_before_getContext");
       const result = await withTimeout(getContext(index.db, index.repoId, names, similarityQueryText), REPO_CONTEXT_TIMEOUT_MS);
       if (result === "timeout") {
         repoContextTimedOut = true;
@@ -117,6 +139,7 @@ export async function assembleContext(
       // without cross-file context rather than fail the whole review over it.
     }
   }
+  await markCheckpoint(index?.db, traceKey, "5_end");
 
   return { prDiff, files, repoContext, repoContextTimedOut };
 }
