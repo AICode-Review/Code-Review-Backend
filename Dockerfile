@@ -13,6 +13,16 @@ RUN npm run build
 FROM node:24-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Node's default UV_THREADPOOL_SIZE is 4 — DNS lookups and TLS handshakes both consume
+# threadpool slots. Confirmed in production (2026-09-15): a review job's outbound call
+# (embeddings) stalled, and — despite a real per-call timeout and no SDK-level retries —
+# stayed stuck for many minutes with a fully healthy, non-blocked event loop (heartbeat
+# timers kept firing normally throughout). That points at threadpool exhaustion, not an
+# event-loop hang: with only 4 slots shared process-wide across every concurrent outbound
+# HTTPS call this worker makes (Supabase, OpenAI, Anthropic, GitHub, batched 5 review jobs
+# at once), one genuinely stalled connection can starve every other TLS/DNS-bound call in
+# the process, including totally unrelated ones. A larger pool gives real headroom.
+ENV UV_THREADPOOL_SIZE=16
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev \
     # docker CLI only (no daemon) — the worker process shells out to a
