@@ -190,6 +190,7 @@ export async function getContext(
       // Leave similarChunks empty — definitions/callers/relatedTests are still valid.
     }
   }
+  await markCheckpoint(db, repoId, "8_returning");
 
   return { definitions, callers, relatedTests, similarChunks };
 }
