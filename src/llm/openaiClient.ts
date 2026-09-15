@@ -20,7 +20,13 @@ export async function callOpenAI(model: string, messages: LlmMessage[], maxToken
       response_format: { type: "json_object" },
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
     },
-    { timeout: LLM_CALL_TIMEOUT_MS },
+    // maxRetries: 0 — llm/router.ts's withRetry already retries this whole call up to 3 times
+    // with its own backoff. Confirmed live (2026-09-15) that leaving the SDK's own default
+    // internal retries (2 extra attempts on timeouts/429s, each re-running the full timeout)
+    // enabled elsewhere compounded into a multi-minute stall from what should have been a
+    // single bounded attempt — this call must be the only retry layer for withRetry to work as
+    // designed.
+    { timeout: LLM_CALL_TIMEOUT_MS, maxRetries: 0 },
   );
 
   const text = res.choices[0]?.message?.content ?? "";

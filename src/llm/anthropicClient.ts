@@ -73,7 +73,10 @@ export async function callAnthropic(model: string, messages: LlmMessage[], maxTo
         ...(systemMessages.length > 0 ? { system: systemMessages.map((m) => m.content).join("\n\n") } : {}),
         messages: anthropicMessages,
       },
-      { timeout: LLM_CALL_TIMEOUT_MS },
+      // maxRetries: 0 — see openaiClient.ts's callOpenAI for why the SDK's own default
+      // internal retries must be disabled when llm/router.ts's withRetry already retries
+      // this whole call itself.
+      { timeout: LLM_CALL_TIMEOUT_MS, maxRetries: 0 },
     );
     // The Bedrock SDK bundles its own nested @anthropic-ai/sdk types, distinct
     // from the top-level one used elsewhere in this file — plain runtime check.
@@ -97,7 +100,7 @@ export async function callAnthropic(model: string, messages: LlmMessage[], maxTo
       ...(system.length > 0 ? { system } : {}),
       messages: anthropicMessages,
     },
-    { timeout: LLM_CALL_TIMEOUT_MS },
+    { timeout: LLM_CALL_TIMEOUT_MS, maxRetries: 0 },
   );
 
   const text = res.content

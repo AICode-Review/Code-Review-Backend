@@ -30,7 +30,13 @@ const EMBED_CALL_TIMEOUT_MS = 20_000;
 async function embedBatch(client: OpenAI, model: string, batch: string[], attempts = 5): Promise<OpenAI.Embeddings.CreateEmbeddingResponse> {
   for (let i = 0; i < attempts; i++) {
     try {
-      return await client.embeddings.create({ model, input: batch }, { timeout: EMBED_CALL_TIMEOUT_MS });
+      // maxRetries: 0 — this SDK already retries transient errors (including timeouts and
+      // 429s) internally by default (2 extra attempts), each subject to its own `timeout`
+      // above. Left enabled, that stacks with this function's OWN 429/retry-after handling
+      // below into two independent retry layers for the same failure, which can compound a
+      // single rate-limited or slow call into several minutes. This function is the only
+      // retry layer that should exist for this call.
+      return await client.embeddings.create({ model, input: batch }, { timeout: EMBED_CALL_TIMEOUT_MS, maxRetries: 0 });
     } catch (err) {
       const isRateLimit = err instanceof OpenAI.APIError && err.status === 429;
       if (!isRateLimit || i === attempts - 1) throw err;
