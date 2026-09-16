@@ -65,6 +65,48 @@ async function runEmbedDiagFromJobCallback(): Promise<void> {
   }
 }
 
+// TEMPORARY diagnostic (2026-09-16): every isolated piece of the real path has now succeeded —
+// the API/SDK, the worker process, repeat calls, concurrent calls, and running inside an actual
+// boss.work() callback. The one remaining structural difference between all of those tests and
+// jobs/reviewRecovery.ts's executeReviewJob (the real caller) is that it acquires a raw pg
+// Client via getPool().connect() and holds it open — with an 'error' listener registered — for
+// the review's ENTIRE duration, including while embedTexts runs. This replicates exactly that:
+// hold a real client open the same way, then call embedTexts while it's held, to test whether
+// holding that connection open is itself the differentiator. Remove once the real hang is found.
+let ranEmbedDiagWithHeldClient = false;
+async function runEmbedDiagWithHeldClient(): Promise<void> {
+  if (ranEmbedDiagWithHeldClient) return;
+  ranEmbedDiagWithHeldClient = true;
+  const { embedTexts } = await import("./indexer/embeddings.js");
+  const { getPool } = await import("./db/postgres.js");
+  const pool = getPool();
+  const heldClient = await pool.connect();
+  let healthy = true;
+  const onError = () => {
+    healthy = false;
+  };
+  heldClient.on("error", onError);
+  const startedAt = Date.now();
+  try {
+    const result = await embedTexts(["diagnostic call while holding a raw pg client open"]);
+    await pool.query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:7_with_held_client:ok:durationMs=${Date.now() - startedAt}:vectors=${result.vectors.length}`],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+    await pool
+      .query(
+        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+        [`checkpoint:worker-embed-diag:7_with_held_client:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+      )
+      .catch(() => undefined);
+  } finally {
+    heldClient.removeListener("error", onError);
+    heldClient.release(!healthy);
+  }
+}
+
 if (isMainModule) {
   initSentry();
 
@@ -228,6 +270,7 @@ export async function main() {
   await boss.work(JOBS.maintenance, { batchSize: 1 }, async () => {
     await maintainOperations();
     void runEmbedDiagFromJobCallback();
+    void runEmbedDiagWithHeldClient();
   });
   await boss.schedule(JOBS.maintenance, "* * * * *", {});
   await maintainOperations();
