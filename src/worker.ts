@@ -328,6 +328,62 @@ async function runWrappedGetContextDiag(): Promise<void> {
   }
 }
 
+// TEMPORARY diagnostic (2026-09-16): getContext() wrapped in the exact production withTimeout
+// still succeeded, using hardcoded placeholder symbol names/query text. Every diagnostic so far
+// has used simple hardcoded strings for the embedding input — never the REAL diff-derived
+// names/text that extractChangedSymbols() produces from the actual PR content. This calls the
+// real assembleContext() directly — the exact function confirmed to hang in the real pipeline —
+// with real GitHub data, real diff parsing, and the real extractChangedSymbols() output feeding
+// into the real, wrapped getContext() call. The most faithful reproduction possible short of
+// the actual webhook path. Remove once the real hang is found.
+let ranAssembleContextDiag = false;
+async function runAssembleContextDiag(): Promise<void> {
+  if (ranAssembleContextDiag) return;
+  ranAssembleContextDiag = true;
+  const { getAdapter } = await import("./adapters/index.js");
+  const { assembleContext } = await import("./engine/contextAssembly.js");
+  const { getDb } = await import("./db/client.js");
+  const { getPool } = await import("./db/postgres.js");
+  const pool = getPool();
+  const startedAt = Date.now();
+  try {
+    const adapter = getAdapter("github");
+    const pr = {
+      repo: {
+        platform: "github" as const,
+        externalId: "1306464091",
+        owner: "dineshmagizh93",
+        name: "Demo",
+        orgExternalId: "225228105",
+        orgName: "dineshmagizh93",
+        installationId: 159476908,
+      },
+      number: 9,
+    };
+    const prInfo = await adapter.getPrInfo(pr);
+    const result = await assembleContext(
+      adapter,
+      { ...pr, title: prInfo.title, author: prInfo.author },
+      prInfo.baseSha,
+      prInfo.headSha,
+      { db: getDb(), repoId: "a5f9c966-1b12-4d9d-a21a-0b2fa38ee053" },
+      [],
+    );
+    await pool.query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:12_assembleContext:ok:durationMs=${Date.now() - startedAt}:files=${result.files.length}:timedOut=${result.repoContextTimedOut}`],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+    await pool
+      .query(
+        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+        [`checkpoint:worker-embed-diag:12_assembleContext:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+      )
+      .catch(() => undefined);
+  }
+}
+
 if (isMainModule) {
   initSentry();
 
@@ -494,7 +550,7 @@ export async function main() {
     void runEmbedDiagWithHeldClient();
     void runGetContextDiag();
     void runGithubThenGetContextDiag();
-    void runWrappedGetContextDiag();
+    void runAssembleContextDiag();
   });
   await boss.schedule(JOBS.maintenance, "* * * * *", {});
   await maintainOperations();
