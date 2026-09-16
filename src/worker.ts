@@ -107,6 +107,43 @@ async function runEmbedDiagWithHeldClient(): Promise<void> {
   }
 }
 
+// TEMPORARY diagnostic (2026-09-16): embedTexts() alone has now succeeded every way it's been
+// tested — solo, repeated, concurrent, from inside a real boss.work() callback, and while
+// holding a raw pg client open. None of those tests called getDb() (the Supabase client) at
+// all beforehand, but the real path makes two real Supabase queries (definitions, callers)
+// inside getContext() immediately before reaching embedTexts. This calls the REAL getContext()
+// function directly — same Supabase client, same real repoId, plausible arguments — to test
+// getContext as a whole rather than embedTexts in isolation. Remove once the real hang is found.
+let ranGetContextDiag = false;
+async function runGetContextDiag(): Promise<void> {
+  if (ranGetContextDiag) return;
+  ranGetContextDiag = true;
+  const { getContext } = await import("./indexer/context.js");
+  const { getDb } = await import("./db/client.js");
+  const { getPool } = await import("./db/postgres.js");
+  const startedAt = Date.now();
+  try {
+    const result = await getContext(
+      getDb(),
+      "a5f9c966-1b12-4d9d-a21a-0b2fa38ee053",
+      ["readUserFile", "listUploads"],
+      "diagnostic query text for getContext",
+    );
+    await getPool().query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:8_getContext:ok:durationMs=${Date.now() - startedAt}:chunks=${result.similarChunks.length}`],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+    await getPool()
+      .query(
+        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+        [`checkpoint:worker-embed-diag:8_getContext:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+      )
+      .catch(() => undefined);
+  }
+}
+
 if (isMainModule) {
   initSentry();
 
@@ -271,6 +308,7 @@ export async function main() {
     await maintainOperations();
     void runEmbedDiagFromJobCallback();
     void runEmbedDiagWithHeldClient();
+    void runGetContextDiag();
   });
   await boss.schedule(JOBS.maintenance, "* * * * *", {});
   await maintainOperations();
