@@ -71,22 +71,37 @@ export async function main() {
   void (async () => {
     const { embedTexts } = await import("./indexer/embeddings.js");
     const { getPool } = await import("./db/postgres.js");
-    const startedAt = Date.now();
-    try {
-      const result = await embedTexts(["worker startup diagnostic embedding test"]);
-      await getPool().query(
-        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
-        [`checkpoint:worker-embed-diag:ok:durationMs=${Date.now() - startedAt}:vectors=${result.vectors.length}`],
-      );
-    } catch (err) {
-      const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
-      await getPool()
-        .query(
+    const record = async (label: string, fn: () => Promise<{ vectors: unknown[] }>) => {
+      const startedAt = Date.now();
+      try {
+        const result = await fn();
+        await getPool().query(
           "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
-          [`checkpoint:worker-embed-diag:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
-        )
-        .catch(() => undefined);
-    }
+          [`checkpoint:worker-embed-diag:${label}:ok:durationMs=${Date.now() - startedAt}:vectors=${result.vectors.length}`],
+        );
+      } catch (err) {
+        const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+        await getPool()
+          .query(
+            "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+            [`checkpoint:worker-embed-diag:${label}:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+          )
+          .catch(() => undefined);
+      }
+    };
+    // Call 1: cold, nothing else happening — matches the already-successful test. Call 2,
+    // immediately after: tests whether a SECOND call on the same long-running process/client
+    // singleton degrades, which a single isolated call can't reveal. Calls 3-5: fired
+    // concurrently (Promise.all, not sequential) to mimic the review pipeline's actual pattern
+    // of interleaved outbound calls (Supabase queries + this) happening close together, in case
+    // the hang only manifests under real concurrency rather than one call at a time.
+    await record("1_solo", () => embedTexts(["diagnostic call 1"]));
+    await record("2_solo_again", () => embedTexts(["diagnostic call 2"]));
+    await Promise.all([
+      record("3_concurrent", () => embedTexts(["diagnostic call 3"])),
+      record("4_concurrent", () => embedTexts(["diagnostic call 4"])),
+      record("5_concurrent", () => embedTexts(["diagnostic call 5"])),
+    ]);
   })();
 
   // batchSize > 1 + Promise.all (not a sequential for-loop) so multiple
