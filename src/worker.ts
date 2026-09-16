@@ -144,6 +144,78 @@ async function runGetContextDiag(): Promise<void> {
   }
 }
 
+// TEMPORARY diagnostic (2026-09-16): getContext() as a whole (real Supabase queries + a real
+// embedTexts call) has now succeeded too, with zero GitHub API activity beforehand. The real
+// review pipeline makes 1-3 real GitHub API calls via Octokit (getPrInfo, getDiff, getFile)
+// immediately before reaching this same point — Octokit uses native fetch/undici, while the
+// OpenAI SDK uses node-fetch, different transport stacks, but both consume the same OS file
+// descriptors and the same libuv DNS/TLS threadpool. This is the one remaining untested
+// combination: make real Octokit calls against the actual test PR first, then call getContext,
+// in the same job invocation. Remove once the real hang is found.
+let ranGithubThenGetContextDiag = false;
+async function runGithubThenGetContextDiag(): Promise<void> {
+  if (ranGithubThenGetContextDiag) return;
+  ranGithubThenGetContextDiag = true;
+  const { getAdapter } = await import("./adapters/index.js");
+  const { getContext } = await import("./indexer/context.js");
+  const { getDb } = await import("./db/client.js");
+  const { getPool } = await import("./db/postgres.js");
+  const pool = getPool();
+  const startedAt = Date.now();
+  const stage = { name: "start" };
+  try {
+    const adapter = getAdapter("github");
+    const pr = {
+      repo: {
+        platform: "github" as const,
+        externalId: "1306464091",
+        owner: "dineshmagizh93",
+        name: "Demo",
+        orgExternalId: "225228105",
+        orgName: "dineshmagizh93",
+      },
+      number: 9,
+    };
+    stage.name = "getPrInfo";
+    const prInfo = await adapter.getPrInfo(pr);
+    await pool.query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:9_github_then_getContext:a_got_pr_info:${Date.now() - startedAt}ms`],
+    );
+    stage.name = "getDiff";
+    await adapter.getDiff(pr);
+    await pool.query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:9_github_then_getContext:b_got_diff:${Date.now() - startedAt}ms`],
+    );
+    stage.name = "getFile";
+    await adapter.getFile(pr.repo, "scrutinye-test/launchReadinessCheck.js", prInfo.headSha);
+    await pool.query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:9_github_then_getContext:c_got_file:${Date.now() - startedAt}ms`],
+    );
+    stage.name = "getContext";
+    const result = await getContext(
+      getDb(),
+      "a5f9c966-1b12-4d9d-a21a-0b2fa38ee053",
+      ["readUserFile", "listUploads"],
+      "diagnostic query text after real github calls",
+    );
+    await pool.query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:9_github_then_getContext:ok:durationMs=${Date.now() - startedAt}:chunks=${result.similarChunks.length}`],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+    await pool
+      .query(
+        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+        [`checkpoint:worker-embed-diag:9_github_then_getContext:error_at_${stage.name}:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+      )
+      .catch(() => undefined);
+  }
+}
+
 if (isMainModule) {
   initSentry();
 
@@ -309,6 +381,7 @@ export async function main() {
     void runEmbedDiagFromJobCallback();
     void runEmbedDiagWithHeldClient();
     void runGetContextDiag();
+    void runGithubThenGetContextDiag();
   });
   await boss.schedule(JOBS.maintenance, "* * * * *", {});
   await maintainOperations();
