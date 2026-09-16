@@ -97,6 +97,34 @@ export function buildServer() {
   });
 
   app.get("/healthz", async () => ({ ok: true }));
+  // TEMPORARY diagnostic route (2026-09-16) — isolates whether the confirmed embeddings-call
+  // hang (getContext -> embedTexts -> client.embeddings.create) is specific to running inside
+  // a pg-boss worker job, or reproduces from a plain HTTP request handler too. Bypasses the
+  // whole webhook -> queue -> worker cycle so a test takes seconds instead of minutes. Gated by
+  // a throwaway token (not a real secret) purely to keep it off search engines/crawlers — this
+  // route is removed once the real hang is found. Remove before considering this done.
+  app.get("/debug/embed-test", async (req, reply) => {
+    const query = req.query as { token?: string };
+    if (query.token !== "diag-embed-2026-09-16") return reply.code(404).send();
+    const { embedTexts } = await import("./indexer/embeddings.js");
+    const startedAt = Date.now();
+    try {
+      const result = await embedTexts(["hello world, this is a diagnostic embedding test"]);
+      return {
+        ok: true,
+        durationMs: Date.now() - startedAt,
+        vectorCount: result.vectors.length,
+        vectorLength: result.vectors[0]?.length ?? 0,
+        costUsd: result.costUsd,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      };
+    }
+  });
   app.get("/readyz", async (_req, reply) => {
     try {
       if (await checkReadiness()) return { ok: true };
