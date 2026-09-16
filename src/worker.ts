@@ -268,6 +268,66 @@ async function runExecuteReviewJobDiag(): Promise<void> {
   }
 }
 
+// TEMPORARY diagnostic (2026-09-16): the real executeReviewJob() reproduced the exact hang at
+// the exact same point (assembleContext's "before_getContext" checkpoint, nothing after) —
+// twice. Every hand-reassembled version of this same sequence (real GitHub calls, then a
+// DIRECT, UNWRAPPED call to getContext) succeeded. The one remaining structural difference: the
+// real path calls getContext() wrapped in engine/contextAssembly.ts's own withTimeout()
+// (Promise.race against a setTimeout), while every successful diagnostic called it directly,
+// unwrapped. This replicates that exact wrapper around the exact same real getContext call
+// that has already succeeded unwrapped, to test whether the Promise.race wrapping itself is
+// the differentiator. Remove once the real hang is found.
+let ranWrappedGetContextDiag = false;
+async function runWrappedGetContextDiag(): Promise<void> {
+  if (ranWrappedGetContextDiag) return;
+  ranWrappedGetContextDiag = true;
+  const { getContext } = await import("./indexer/context.js");
+  const { getDb } = await import("./db/client.js");
+  const { getPool } = await import("./db/postgres.js");
+  const pool = getPool();
+  const startedAt = Date.now();
+  const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  try {
+    const result = await withTimeout(
+      getContext(
+        getDb(),
+        "a5f9c966-1b12-4d9d-a21a-0b2fa38ee053",
+        ["readUserFile", "listUploads"],
+        "diagnostic query text through withTimeout wrapper",
+      ),
+      60_000,
+    );
+    await pool.query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [
+        result === "timeout"
+          ? `checkpoint:worker-embed-diag:11_wrapped_getContext:timed_out:durationMs=${Date.now() - startedAt}`
+          : `checkpoint:worker-embed-diag:11_wrapped_getContext:ok:durationMs=${Date.now() - startedAt}:chunks=${result.similarChunks.length}`,
+      ],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+    await pool
+      .query(
+        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+        [`checkpoint:worker-embed-diag:11_wrapped_getContext:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+      )
+      .catch(() => undefined);
+  }
+}
+
 if (isMainModule) {
   initSentry();
 
@@ -434,7 +494,7 @@ export async function main() {
     void runEmbedDiagWithHeldClient();
     void runGetContextDiag();
     void runGithubThenGetContextDiag();
-    void runExecuteReviewJobDiag();
+    void runWrappedGetContextDiag();
   });
   await boss.schedule(JOBS.maintenance, "* * * * *", {});
   await maintainOperations();
