@@ -217,6 +217,57 @@ async function runGithubThenGetContextDiag(): Promise<void> {
   }
 }
 
+// TEMPORARY diagnostic (2026-09-16): every individual piece has now succeeded, reassembled by
+// hand in the diagnostic above (real GitHub calls, then real getContext/embedTexts, all in one
+// job invocation). The one thing NOT yet tested is the actual executeReviewJob() function
+// itself — reviewRecovery.ts's full logic (advisory lock, recoverRun, the Proxy-wrapped
+// adapter, then handleReviewRun's entire org/quota/suspension chain, row claiming, config
+// fetch, THEN assembleContext/getContext) rather than a hand-reassembled approximation of it.
+// Calls the real function with a real, complete ReviewRunJob against the actual test PR —
+// this will create a genuine review_runs row and, if it succeeds, post real comments, exactly
+// like a real webhook-triggered run would. Remove once the real hang is found.
+let ranExecuteReviewJobDiag = false;
+async function runExecuteReviewJobDiag(): Promise<void> {
+  if (ranExecuteReviewJobDiag) return;
+  ranExecuteReviewJobDiag = true;
+  const { executeReviewJob: execJob } = await import("./jobs/reviewRecovery.js");
+  const { randomUUID } = await import("node:crypto");
+  const { getPool } = await import("./db/postgres.js");
+  const pool = getPool();
+  const startedAt = Date.now();
+  const queueId = randomUUID();
+  try {
+    await execJob(queueId, {
+      pr: {
+        repo: {
+          platform: "github",
+          externalId: "1306464091",
+          owner: "dineshmagizh93",
+          name: "Demo",
+          orgExternalId: "225228105",
+          orgName: "dineshmagizh93",
+          installationId: 159476908,
+        },
+        number: 9,
+      },
+      headSha: "1f8ba04placeholderwillberefetched00000000",
+      reason: "manual",
+    });
+    await pool.query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:10_executeReviewJob:ok:durationMs=${Date.now() - startedAt}:queueId=${queueId}`],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+    await pool
+      .query(
+        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+        [`checkpoint:worker-embed-diag:10_executeReviewJob:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+      )
+      .catch(() => undefined);
+  }
+}
+
 if (isMainModule) {
   initSentry();
 
@@ -383,6 +434,7 @@ export async function main() {
     void runEmbedDiagWithHeldClient();
     void runGetContextDiag();
     void runGithubThenGetContextDiag();
+    void runExecuteReviewJobDiag();
   });
   await boss.schedule(JOBS.maintenance, "* * * * *", {});
   await maintainOperations();
