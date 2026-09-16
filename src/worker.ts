@@ -173,6 +173,7 @@ async function runGithubThenGetContextDiag(): Promise<void> {
         name: "Demo",
         orgExternalId: "225228105",
         orgName: "dineshmagizh93",
+        installationId: 159476908,
       },
       number: 9,
     };
