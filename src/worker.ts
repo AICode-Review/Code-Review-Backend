@@ -60,6 +60,35 @@ export async function main() {
 
   const boss = await getBoss();
 
+  // TEMPORARY diagnostic (2026-09-16): the same embeddings call that hangs when invoked from
+  // a review job succeeded in 1.4s when tested via a plain HTTP handler in the SERVER process
+  // — but server and worker are separate Node processes (concurrently), so that didn't yet
+  // prove the call is fine from the WORKER process's own environment. This fires the identical
+  // call from worker.ts's own startup, independent of pg-boss job processing entirely, and
+  // records the result via the same worker_heartbeats checkpoint mechanism used elsewhere —
+  // isolates "worker process itself" from "something specific to the review-job code path."
+  // Remove once the real hang is found.
+  void (async () => {
+    const { embedTexts } = await import("./indexer/embeddings.js");
+    const { getPool } = await import("./db/postgres.js");
+    const startedAt = Date.now();
+    try {
+      const result = await embedTexts(["worker startup diagnostic embedding test"]);
+      await getPool().query(
+        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+        [`checkpoint:worker-embed-diag:ok:durationMs=${Date.now() - startedAt}:vectors=${result.vectors.length}`],
+      );
+    } catch (err) {
+      const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+      await getPool()
+        .query(
+          "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+          [`checkpoint:worker-embed-diag:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+        )
+        .catch(() => undefined);
+    }
+  })();
+
   // batchSize > 1 + Promise.all (not a sequential for-loop) so multiple
   // review.run jobs — different PRs, or an old + a superseding new run for
   // the same PR — can genuinely overlap. That overlap is exactly the
