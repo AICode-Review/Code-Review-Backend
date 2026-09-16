@@ -34,6 +34,37 @@ export const isMainModule =
   Boolean(process.argv[1]) &&
   import.meta.url === pathToFileURL(process.argv[1] as string).href;
 
+// TEMPORARY diagnostic (2026-09-16): a worker-startup IIFE test (5 calls: solo, repeat,
+// 3-concurrent) all succeeded in under a second each, ruling out the OpenAI API/SDK,
+// environment, worker process itself, repeat-call degradation, and plain concurrency as the
+// cause. The one thing that test COULDN'T cover: running from inside an actual pg-boss
+// boss.work() job callback, which is how the real, hanging call is invoked. Piggybacks on the
+// existing maintenance job (already scheduled every minute) to test exactly that, guarded to
+// fire once. Remove once the real hang is found.
+let ranEmbedDiagFromJobCallback = false;
+async function runEmbedDiagFromJobCallback(): Promise<void> {
+  if (ranEmbedDiagFromJobCallback) return;
+  ranEmbedDiagFromJobCallback = true;
+  const { embedTexts } = await import("./indexer/embeddings.js");
+  const { getPool } = await import("./db/postgres.js");
+  const startedAt = Date.now();
+  try {
+    const result = await embedTexts(["diagnostic call from inside boss.work() callback"]);
+    await getPool().query(
+      "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+      [`checkpoint:worker-embed-diag:6_from_job_callback:ok:durationMs=${Date.now() - startedAt}:vectors=${result.vectors.length}`],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+    await getPool()
+      .query(
+        "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
+        [`checkpoint:worker-embed-diag:6_from_job_callback:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
+      )
+      .catch(() => undefined);
+  }
+}
+
 if (isMainModule) {
   initSentry();
 
@@ -59,50 +90,6 @@ export async function main() {
   }
 
   const boss = await getBoss();
-
-  // TEMPORARY diagnostic (2026-09-16): the same embeddings call that hangs when invoked from
-  // a review job succeeded in 1.4s when tested via a plain HTTP handler in the SERVER process
-  // — but server and worker are separate Node processes (concurrently), so that didn't yet
-  // prove the call is fine from the WORKER process's own environment. This fires the identical
-  // call from worker.ts's own startup, independent of pg-boss job processing entirely, and
-  // records the result via the same worker_heartbeats checkpoint mechanism used elsewhere —
-  // isolates "worker process itself" from "something specific to the review-job code path."
-  // Remove once the real hang is found.
-  void (async () => {
-    const { embedTexts } = await import("./indexer/embeddings.js");
-    const { getPool } = await import("./db/postgres.js");
-    const record = async (label: string, fn: () => Promise<{ vectors: unknown[] }>) => {
-      const startedAt = Date.now();
-      try {
-        const result = await fn();
-        await getPool().query(
-          "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
-          [`checkpoint:worker-embed-diag:${label}:ok:durationMs=${Date.now() - startedAt}:vectors=${result.vectors.length}`],
-        );
-      } catch (err) {
-        const message = err instanceof Error ? `${err.name}:${err.message}` : String(err);
-        await getPool()
-          .query(
-            "insert into worker_heartbeats(id) values($1) on conflict(id) do update set updated_at=now()",
-            [`checkpoint:worker-embed-diag:${label}:error:durationMs=${Date.now() - startedAt}:${message}`.slice(0, 200)],
-          )
-          .catch(() => undefined);
-      }
-    };
-    // Call 1: cold, nothing else happening — matches the already-successful test. Call 2,
-    // immediately after: tests whether a SECOND call on the same long-running process/client
-    // singleton degrades, which a single isolated call can't reveal. Calls 3-5: fired
-    // concurrently (Promise.all, not sequential) to mimic the review pipeline's actual pattern
-    // of interleaved outbound calls (Supabase queries + this) happening close together, in case
-    // the hang only manifests under real concurrency rather than one call at a time.
-    await record("1_solo", () => embedTexts(["diagnostic call 1"]));
-    await record("2_solo_again", () => embedTexts(["diagnostic call 2"]));
-    await Promise.all([
-      record("3_concurrent", () => embedTexts(["diagnostic call 3"])),
-      record("4_concurrent", () => embedTexts(["diagnostic call 4"])),
-      record("5_concurrent", () => embedTexts(["diagnostic call 5"])),
-    ]);
-  })();
 
   // batchSize > 1 + Promise.all (not a sequential for-loop) so multiple
   // review.run jobs — different PRs, or an old + a superseding new run for
@@ -240,6 +227,7 @@ export async function main() {
   });
   await boss.work(JOBS.maintenance, { batchSize: 1 }, async () => {
     await maintainOperations();
+    void runEmbedDiagFromJobCallback();
   });
   await boss.schedule(JOBS.maintenance, "* * * * *", {});
   await maintainOperations();
